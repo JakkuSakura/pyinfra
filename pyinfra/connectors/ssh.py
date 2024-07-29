@@ -562,8 +562,6 @@ class SSHConnector(BaseConnector):
         user = self.data["ssh_user"]
         if user:
             user = "{0}@".format(user)
-        else:
-            user = ""
 
         ssh_flags = []
         # To avoid asking for interactive input, specify BatchMode=yes
@@ -608,7 +606,7 @@ class SSHConnector(BaseConnector):
             rsync_flags=" ".join(flags),
             ssh_flags=" ".join(ssh_flags),
             remote_rsync_command=remote_rsync_command,
-            user=user,
+            user=user or '',
             hostname=hostname,
             src=src,
             dest=dest,
