@@ -562,6 +562,8 @@ class SSHConnector(BaseConnector):
         user = self.data["ssh_user"]
         if user:
             user = "{0}@".format(user)
+        else:
+            user = ""
 
         ssh_flags = []
         # To avoid asking for interactive input, specify BatchMode=yes
