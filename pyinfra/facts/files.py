@@ -15,6 +15,7 @@ from typing_extensions import Literal, NotRequired, TypedDict
 from pyinfra.api.command import QuoteString, make_formatted_string_command
 from pyinfra.api.facts import FactBase
 from pyinfra.api.util import try_int
+from pyinfra.facts.util.units import parse_human_readable_size, parse_size
 
 LINUX_STAT_COMMAND = "stat -c 'user=%U group=%G mode=%A atime=%X mtime=%Y ctime=%Z size=%s %N'"
 BSD_STAT_COMMAND = "stat -f 'user=%Su group=%Sg mode=%Sp atime=%a mtime=%m ctime=%c size=%z %N%SY'"
@@ -318,15 +319,62 @@ class FindFilesBase(FactBase):
     abstract = True
     default = list
     type_flag: str
+    # exact size in bytes or human-readable format. GB means 1e9 bytes, GiB means 2^30 bytes
+    size: Optional[str | int]
+    # minimum size in bytes or human-readable format
+    min_size: Optional[str | int]
+    # maximum size in bytes or human-readable format
+    max_size: Optional[str | int]
+    # maximum depth to descend to
+    maxdepth: Optional[int]
+    # True if the last component of the pathname being examined matches pattern.
+    # Special shell pattern matching characters (“[”, “]”, “*”, and “?”) may be
+    # used as part of pattern.  These characters may be matched explicitly by
+    # escaping them with a backslash (“\”).
+    name: Optional[str]
+    # Like -name, but the match is case insensitive.
+    iname: Optional[str]
+    #  True if the whole path of the file matches pattern using regular
+    #  expression.  To match a file named “./foo/xyzzy”, you can use the regular
+    #  expression “.*/[xyz]*” or “.*/foo/.*”, but not “xyzzy” or “/foo/”.
+    regex: Optional[str]
+
+    args: List[str]
 
     def process(self, output):
         return output
 
     def command(self, path, quote_path=True):
+        args = []
+        """
+        Why we need special handling for size:
+        https://unix.stackexchange.com/questions/275925/why-does-find-size-1g-not-find-any-files
+        In short, 'c' means bytes, without it, it means 512-byte blocks. 
+        If we use any units other than 'c', it has a weird rounding behavior, and is implementation-specific.
+        So, we always use 'c'
+        """
+        if self.min_size is not None:
+            args.append("-size +{0}c".format(parse_size(self.min_size)))
+        if self.max_size is not None:
+            args.append("-size -{0}c".format(parse_size(self.max_size)))
+        if self.size is not None:
+            args.append("-size {0}c".format(parse_size(self.size)))
+        if self.maxdepth is not None:
+            args.append("-maxdepth {0}".format(self.maxdepth))
+        if self.name is not None:
+            args.append("-name {0}".format(QuoteString(self.name)))
+        if self.iname is not None:
+            args.append("-iname {0}".format(QuoteString(self.iname)))
+        if self.regex is not None:
+            args.append("-regex {0}".format(QuoteString(self.regex)))
+
+        args.extend(self.args)
+        args = " ".join(args)
         return make_formatted_string_command(
-            "find {0} -type {type_flag} || true",
+            "find {0} -type {type_flag} {args} || true",
             QuoteString(path) if quote_path else path,
             type_flag=self.type_flag,
+            args=args,
         )
 
 
