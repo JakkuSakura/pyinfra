@@ -32,6 +32,9 @@ def _make_systemctl_cmd(user_mode=False, machine=None, user_name=None):
             systemctl_cmd.append("--machine={1}@{0}".format(machine, user_name))
         else:
             systemctl_cmd.append("--machine={0}".format(machine))
+    elif user_name is not None:
+        # If only the user is given, assume that the connection should be made to the local machine
+        systemctl_cmd.append("--machine={0}@.host".format(user_name))
 
     return StringCommand(*systemctl_cmd)
 
@@ -58,7 +61,7 @@ class SystemdStatus(FactBase[Dict[str, bool]]):
     default = dict
 
     state_key = "SubState"
-    state_values = ["running", "waiting", "exited"]
+    state_values = ["running", "waiting", "exited", "listening"]
 
     def command(
         self,

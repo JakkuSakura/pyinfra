@@ -94,7 +94,7 @@ def reboot(delay=10, interval=1, reboot_timeout=300):
 
         while True:
             host.connect(show_errors=False)
-            if host.connection:
+            if host.connected:
                 break
 
             if retries > max_retries:
@@ -723,11 +723,11 @@ def crontab(
         if any(
             (
                 special_time != existing_crontab.get("special_time"),
-                minute != existing_crontab.get("minute"),
-                hour != existing_crontab.get("hour"),
-                month != existing_crontab.get("month"),
-                day_of_week != existing_crontab.get("day_of_week"),
-                day_of_month != existing_crontab.get("day_of_month"),
+                try_int(minute) != existing_crontab.get("minute"),
+                try_int(hour) != existing_crontab.get("hour"),
+                try_int(month) != existing_crontab.get("month"),
+                try_int(day_of_week) != existing_crontab.get("day_of_week"),
+                try_int(day_of_month) != existing_crontab.get("day_of_month"),
                 existing_crontab_command != command,
             ),
         ):
@@ -881,11 +881,11 @@ def user_authorized_keys(
 
         if path.exists(try_path):
             with open(try_path, "r") as f:
-                return f.read().strip()
+                return [key.strip() for key in f.readlines()]
 
-        return key.strip()
+        return [key.strip()]
 
-    public_keys = list(map(read_any_pub_key_file, public_keys))
+    public_keys = [key for key_or_file in public_keys for key in read_any_pub_key_file(key_or_file)]
 
     # Ensure .ssh directory
     # note that this always outputs commands unless the SSH user has access to the

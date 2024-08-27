@@ -915,7 +915,8 @@ def template(
     user: str | None = None,
     group: str | None = None,
     mode: str | None = None,
-    create_remote_dir=True,
+    create_remote_dir: bool = True,
+    jinja_env_kwargs: dict[str, Any] | None = None,
     **data,
 ):
     '''
@@ -927,11 +928,17 @@ def template(
     + group: group to own the files
     + mode: permissions of the files
     + create_remote_dir: create the remote directory if it doesn't exist
+    + jinja_env_kwargs: keyword arguments to be passed into the jinja Environment()
 
     ``create_remote_dir``:
         If the remote directory does not exist it will be created using the same
         user & group as passed to ``files.put``. The mode will *not* be copied over,
         if this is required call ``files.directory`` separately.
+
+    ``jinja_env_kwargs``:
+        To have more control over how jinja2 renders your template, you can pass
+        a dict with arguments that will be passed as keyword args to the jinja2
+        `Environment() <https://jinja.palletsprojects.com/en/3.0.x/api/#jinja2.Environment>`_.
 
     Notes:
        Common convention is to store templates in a "templates" directory and
@@ -1002,7 +1009,7 @@ def template(
 
     # Render and make file-like it's output
     try:
-        output = get_template(src).render(data)
+        output = get_template(src, jinja_env_kwargs).render(data)
     except (TemplateRuntimeError, TemplateSyntaxError, UndefinedError) as e:
         trace_frames = [
             frame

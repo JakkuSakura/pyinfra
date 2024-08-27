@@ -20,9 +20,9 @@ class TestTerraformConnector(TestCase):
         with self.assertRaises(InventoryError) as context:
             list(TerraformInventoryConnector.make_names_data("output_key"))
 
-        assert (
-            context.exception.args[0]
-            == "No Terraform output with key: `output_key`, valid keys:\n   - hello.world"
+        assert context.exception.args[0] == (
+            "No Terraform output with key: `output_key`, "
+            "valid keys:\n   - hello\n   - hello.world"
         )
 
     @patch("pyinfra.connectors.terraform.local.shell")
@@ -58,7 +58,7 @@ class TestTerraformConnector(TestCase):
             (
                 "@terraform/somehost",
                 {"ssh_hostname": "somehost"},
-                ["@terraform"],
+                ["@terraform", "all"],
             ),
         ]
 
@@ -71,7 +71,7 @@ class TestTerraformConnector(TestCase):
             (
                 "@terraform/somehost",
                 {"ssh_hostname": "somehost"},
-                ["@terraform"],
+                ["@terraform", "all"],
             ),
         ]
 
@@ -88,7 +88,7 @@ class TestTerraformConnector(TestCase):
             (
                 "@terraform/a name",
                 {"ssh_hostname": "hostname"},
-                ["@terraform"],
+                ["@terraform", "all"],
             ),
         ]
 

@@ -131,6 +131,10 @@ def print_facts(facts):
 
 
 def print_support_info():
+    from importlib.metadata import PackageNotFoundError, requires, version
+
+    from packaging.requirements import Requirement
+
     click.echo(
         """
     If you are having issues with pyinfra or wish to make feature requests, please
@@ -144,6 +148,18 @@ def print_support_info():
     click.echo("      Release: {0}".format(platform.uname()[2]), err=True)
     click.echo("      Machine: {0}".format(platform.uname()[4]), err=True)
     click.echo("    pyinfra: v{0}".format(__version__), err=True)
+
+    for requirement_string in sorted(requires("pyinfra") or []):
+        requirement = Requirement(requirement_string)
+        try:
+            click.echo(
+                "      {0}: v{1}".format(requirement.name, version(requirement.name)),
+                err=True,
+            )
+        except PackageNotFoundError:
+            # package not installed in this environment
+            continue
+
     click.echo("    Executable: {0}".format(sys.argv[0]), err=True)
     click.echo(
         "    Python: {0} ({1}, {2})".format(

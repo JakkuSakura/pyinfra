@@ -143,10 +143,27 @@ All operations return an operation meta object which provides information about 
         user="myuser",
     )
 
+    create_otheruser = server.user(
+        name="Create user otheruser",
+        user="otheruser",
+    )
+
     server.shell(
-        name="Bootstrap user",
+        name="Bootstrap myuser",
         commands=["..."],
-        _if=create_user,
+        _if=create_user.did_change,
+    )
+
+    # A list can be provided to run an operation if **all** functions return true
+    server.shell(
+        commands=["echo 'Both myuser and otheruser changed'"],
+        _if=[create_user.did_change, create_otheruser.did_change],
+    )
+
+    # You can also build your own lamba functions to achieve, e.g. an OR condition
+    server.shell(
+        commands=["echo 'myuser or otheruser changed'"],
+        _if=lambda: create_user.did_change() or create_otheruser.did_change(),
     )
 
 Operation Output

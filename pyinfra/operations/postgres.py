@@ -16,7 +16,7 @@ See example/postgresql.py for detailed example
 from __future__ import annotations
 
 from pyinfra import host
-from pyinfra.api import MaskString, StringCommand, operation
+from pyinfra.api import MaskString, QuoteString, StringCommand, operation
 from pyinfra.facts.postgres import (
     PostgresDatabases,
     PostgresRoles,
@@ -302,7 +302,7 @@ def dump(
             port=psql_port,
         ),
         ">",
-        dest,
+        QuoteString(dest),
     )
 
 
@@ -345,5 +345,5 @@ def load(
             port=psql_port,
         ),
         "<",
-        src,
+        QuoteString(src),
     )

@@ -14,6 +14,7 @@ venv/
 .cache/
 .mypy_cache/
 .pytest_cache/
+.python-version
 
 .vagrant*
 

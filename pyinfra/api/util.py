@@ -139,12 +139,13 @@ def get_operation_order_from_stack(state: "State"):
     return line_numbers
 
 
-def get_template(filename_or_io: str | IO):
+def get_template(filename_or_io: str | IO, jinja_env_kwargs: dict[str, Any] | None = None):
     """
     Gets a jinja2 ``Template`` object for the input filename or string, with caching
     based on the filename of the template, or the SHA1 of the input string.
     """
-
+    if jinja_env_kwargs is None:
+        jinja_env_kwargs = {}
     file_data = get_file_io(filename_or_io, mode="r")
     cache_key = file_data.cache_key
 
@@ -158,6 +159,7 @@ def get_template(filename_or_io: str | IO):
         undefined=StrictUndefined,
         keep_trailing_newline=True,
         loader=FileSystemLoader(getcwd()),
+        **jinja_env_kwargs,
     ).from_string(template_string)
 
     if cache_key:

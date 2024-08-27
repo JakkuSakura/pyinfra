@@ -5,7 +5,9 @@
         "present": true
     },
     "facts": {
-        "docker.DockerVolumes": []
+        "docker.DockerVolume": {
+            "object_id=nginx_volume": []
+        }
     },
     "commands": [
         "docker volume create nginx_volume -d ceph"

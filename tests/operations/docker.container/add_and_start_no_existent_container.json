@@ -9,7 +9,9 @@
         "start": true
     },
     "facts": {
-        "docker.DockerContainers": []
+        "docker.DockerContainer": {
+            "object_id=nginx": [] 
+        }
     },
     "commands": [
         "docker container create --name nginx -p 80:80 nginx:alpine ; docker container start nginx"

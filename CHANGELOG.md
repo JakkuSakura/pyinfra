@@ -1,3 +1,33 @@
+# v3.1
+
+Here's pyinfra 3.1 - a release primarily driven by contributors new and old - a HUGE THANK YOU to all of you who dedicate time to work on pushing pyinfra forward. New stuff:
+
+- Add `zfs` operations (`dataset`, `snapshot`, `volume`, `filesystem`) facts (`Pools`, `Datasets`, `Filesystems`, `Snapshots`, `Volumes`) (@taliaferro)
+- Add `flatpak` operations (`packages`) and facts (`FlatpakPackage`, `FlatpakPackages`) (@JustScreaMy)
+- Add `jinja_env_kwargs` argument to `files.template` operation (@DonDebonair)
+- Add using dictionaries as `@terraform` output (map from group -> hosts)
+- Add default `@terraform` output key - `pyinfra_inventory.value`, promote connector to beta
+- Add support for multiple keys in each `server.authorized_keys` file (@matthijskooijman)
+- Add print all dependency versions with `--support` flag (@kytta)
+
+Fixes:
+
+- Fix when `ssh_hostname` is set as override data, don't do inventory hostname check
+- Fix `apt.AptSources` parsing special characters (@CondensedTea)
+- Fix `server.reboot` connection detection (@bauen1 + @lemmi)
+- Fix systemd flagging of sockets running (@bauen1)
+- Fix mysql dump quoting (@simonhammes)
+- Fix tilde expansion in files facts (@simonhammes)
+- Fix host lookup check with SSH alias config (@simonhammes)
+- Fix crontab comparison (@andrew-d)
+
+Docs/internal tweaks:
+
+- Improve operations documentation (@bauen1)
+- Default to local machine if `user_name` set in systecmt (@bauen1)
+- Improve efficiency of Docker operations (@apecnascimento)
+- Shallow copy `host.data` data to mutation
+
 # v3.0.2
 
 - Fix `OperationMeta.did_change`: this is now a function as originally designed

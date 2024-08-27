@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import copy
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -41,7 +42,6 @@ def extract_callable_datas(
         # the data is stored on the state temporarily.
         if callable(data):
             data = data()
-
         yield data
 
 
@@ -66,7 +66,10 @@ class HostData:
     def __getattr__(self, key: str):
         for data in extract_callable_datas(self.datas):
             try:
-                return data[key]
+                # Take a shallow copy of the object here, we don't want modifications
+                # to host.data.<X> to stick, instead setting host.data.<Y> = is the
+                # correct way to achieve this (see __setattr__).
+                return copy(data[key])
             except KeyError:
                 pass
 

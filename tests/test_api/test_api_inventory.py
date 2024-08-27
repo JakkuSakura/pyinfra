@@ -51,3 +51,24 @@ class TestInventoryApi(TestCase):
 
         assert inventory.get_host("somehost").data.override_data == "override_data"
         assert inventory.get_host("anotherhost").data.override_data == "override_data"
+
+    def test_inventory_group_data_not_shared(self):
+        group_data = {"test": {}}
+        hosts = ["hosthost", "anotherhost"]
+
+        inventory = Inventory(
+            (hosts, {}),
+            group=(hosts, group_data),
+        )
+
+        hosthost = inventory.get_host("hosthost")
+
+        # Test that modifying host.data.<X> *does not* stick (both on the same
+        # host and also other hosts).
+        hosthost.data.test["hi"] = "no"
+        assert hosthost.data.test == {}
+        assert inventory.get_host("anotherhost").data.test == {}
+
+        # Test that setting host.data.<X> *does* persist
+        hosthost.data.somethingelse = {"hello": "world"}
+        assert hosthost.data.somethingelse == {"hello": "world"}
