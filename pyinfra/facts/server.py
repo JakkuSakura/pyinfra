@@ -387,6 +387,8 @@ class CrontabDict(TypedDict):
     special_time: NotRequired[str]
 
 
+_crontab_env_re = re.compile(r"^\s*([A-Z_]+)=(.*)$")
+
 class Crontab(FactBase[Dict[str, CrontabDict]]):
     """
     Returns a dictionary of cron command -> execution time.
@@ -433,6 +435,9 @@ class Crontab(FactBase[Dict[str, CrontabDict]]):
                     "special_time": special_time,
                     "comments": current_comments,
                 }
+            elif _crontab_env_re.match(line):
+                # TODO: handle environment variables, after introducing #1192
+                continue
             else:
                 minute, hour, day_of_month, month, day_of_week, command = line.split(None, 5)
                 crons[command] = {
