@@ -391,7 +391,7 @@ class CrontabDict(TypedDict):
 
 
 # for compatibility, also keeps a dict of command -> crontab dict
-class CrontabResult(dict):
+class CrontabResult:
     items: List[CrontabDict]
 
     def __init__(self):
@@ -399,10 +399,13 @@ class CrontabResult(dict):
         self.items = []
 
     def add_item(self, item: CrontabDict):
-        if "command" in item:
-            self[item["command"]] = item
-
         self.items.append(item)
+
+    def __getitem__(self, item) -> Optional[CrontabDict]:
+        for i in self.items:
+            if i.get("command") == item:
+                return i
+        return None
 
     def __repr__(self):
         return f"CrontabResult({self.items})"
