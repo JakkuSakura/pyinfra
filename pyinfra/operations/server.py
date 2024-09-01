@@ -660,7 +660,7 @@ def crontab(
     existing_crontab_match = command
 
     if not existing_crontab and cron_name:  # find the crontab by name if provided
-        for cmd, details in crontab.items():
+        for cmd, details in crontab.items:
             if not details["comments"]:
                 continue
             if name_comment in details["comments"]:
