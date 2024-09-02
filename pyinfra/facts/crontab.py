@@ -34,8 +34,10 @@ class CrontabFile:
     def __len__(self):
         return len(self.commands)
 
-    def commands(self):
-        return self.commands
+    def items(self):
+        return {
+            item.get("command") or item.get('env'): item for item in self.commands
+        }
 
     def get_command(
         self, command: Optional[str] = None, name: Optional[str] = None
