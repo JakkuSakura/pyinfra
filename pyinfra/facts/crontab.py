@@ -1,5 +1,5 @@
 import re
-from typing import TypedDict, Union, List, Optional
+from typing import Dict, List, Optional, TypedDict, Union
 
 from typing_extensions import NotRequired
 
@@ -16,7 +16,7 @@ class CrontabDict(TypedDict):
     month: NotRequired[Union[int, str]]
     day_of_month: NotRequired[Union[int, str]]
     day_of_week: NotRequired[Union[int, str]]
-    comments: NotRequired[list[str]]
+    comments: NotRequired[List[str]]
     special_time: NotRequired[str]
 
 
@@ -24,9 +24,14 @@ class CrontabDict(TypedDict):
 class CrontabFile:
     commands: List[CrontabDict]
 
-    def __init__(self):
+    def __init__(self, input_dict: Optional[Dict[str, CrontabDict]] = None):
         super().__init__()
         self.commands = []
+        if input_dict:
+            for command, others in input_dict.items():
+                val = others.copy()
+                val["command"] = command
+                self.add_item(val)
 
     def add_item(self, item: CrontabDict):
         self.commands.append(item)
@@ -34,10 +39,11 @@ class CrontabFile:
     def __len__(self):
         return len(self.commands)
 
+    def __bool__(self):
+        return len(self) > 0
+
     def items(self):
-        return {
-            item.get("command") or item.get('env'): item for item in self.commands
-        }
+        return {item.get("command") or item.get("env"): item for item in self.commands}
 
     def get_command(
         self, command: Optional[str] = None, name: Optional[str] = None
@@ -88,20 +94,20 @@ class CrontabFile:
     def __str__(self):
         return "\n".join(self.format_item(item) for item in self.commands)
 
+    def to_json(self):
+        return self.commands
+
 
 _crontab_env_re = re.compile(r"^\s*([A-Z_]+)=(.*)$")
 
 
 class Crontab(FactBase[CrontabFile]):
     """
-    Returns a dictionary of cron command -> execution time.
+    Returns a dictionary of CrontabFile.
 
     .. code:: python
-
+        # CrontabFile.items()
         {
-            "commands": [
-                ...
-            ]
             "/path/to/command": {
                 "minute": "*",
                 "hour": "*",
@@ -113,9 +119,24 @@ class Crontab(FactBase[CrontabFile]):
                 "special_time": "@daily",
             },
         }
+        # or CrontabFile.to_json()
+        [
+            {
+               command: "/path/to/command",
+               minute: "*",
+               hour: "*",
+               month: "*",
+               day_of_month: "*",
+               day_of_week: "*",
+            },
+            {
+                "command": "echo another command
+                "special_time": "@daily",
+            }
+        ]
     """
 
-    default = dict
+    default = CrontabFile
 
     def requires_command(self, user=None) -> str:
         return "crontab"

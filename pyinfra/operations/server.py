@@ -16,7 +16,6 @@ from pyinfra.api import FunctionCommand, OperationError, StringCommand, operatio
 from pyinfra.api.util import try_int
 from pyinfra.connectors.util import remove_any_sudo_askpass_file
 from pyinfra.facts.files import Directory, FindInFile, Link
-from pyinfra.operations import crontab as crontab_
 from pyinfra.facts.server import (
     Groups,
     Home,
@@ -29,6 +28,7 @@ from pyinfra.facts.server import (
     Users,
     Which,
 )
+from pyinfra.operations import crontab as crontab_
 
 from . import (
     apk,
@@ -93,7 +93,7 @@ def reboot(delay=10, interval=1, reboot_timeout=300):
 
         while True:
             host.connect(show_errors=False)
-            if host.connection:
+            if host.connected:
                 break
 
             if retries > max_retries:
@@ -707,11 +707,11 @@ def user_authorized_keys(
 
         if path.exists(try_path):
             with open(try_path, "r") as f:
-                return f.read().strip()
+                return [key.strip() for key in f.readlines()]
 
-        return key.strip()
+        return [key.strip()]
 
-    public_keys = list(map(read_any_pub_key_file, public_keys))
+    public_keys = [key for key_or_file in public_keys for key in read_any_pub_key_file(key_or_file)]
 
     # Ensure .ssh directory
     # note that this always outputs commands unless the SSH user has access to the

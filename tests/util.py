@@ -241,7 +241,7 @@ class FakeFile:
                 return self._data.split()
             return ["_test_data_"]
 
-            return []
+        return []
 
     def seek(self, *args, **kwargs):
         pass

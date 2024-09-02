@@ -5,10 +5,7 @@ import shlex
 from pyinfra import host
 from pyinfra.api import StringCommand, operation
 from pyinfra.api.util import try_int
-from pyinfra.facts.crontab import CrontabFile
-from pyinfra.facts.server import (
-    Crontab,
-)
+from pyinfra.facts.crontab import Crontab, CrontabFile
 from pyinfra.operations.util.files import sed_replace
 
 
@@ -56,7 +53,7 @@ def crontab(
     .. code:: python
 
         # simple example for a crontab
-        server.crontab(
+        crontab.crontab(
             name="Backup /etc weekly",
             command="/bin/tar cf /tmp/etc_bup.tar /etc",
             name="backup_etc",
@@ -77,24 +74,22 @@ def crontab(
     day_of_week = comma_sep(day_of_week)
     day_of_month = comma_sep(day_of_month)
 
-    crontab: CrontabFile = host.get_fact(Crontab, user=user)
+    ctb0: CrontabFile | dict = host.get_fact(Crontab, user=user)
+    # facts from test are in dict
+    if isinstance(ctb0, dict):
+        ctb = CrontabFile(ctb0)
+    else:
+        ctb = ctb0
     name_comment = "# pyinfra-name={0}".format(cron_name)
 
-    existing_crontab = crontab.get_command(command)
-    existing_crontab_command = command
-    existing_crontab_match = command
-
-    if not existing_crontab and cron_name:  # find the crontab by name if provided
-        for command in crontab.commands:
-            if not command["comments"]:
-                continue
-            if name_comment in command["comments"]:
-                existing_crontab = command
-                existing_crontab_match = command["command"]
-                existing_crontab_command = command["command"]
+    existing_crontab = ctb.get_command(command=command, name=cron_name)
+    existing_crontab_command = existing_crontab["command"] if existing_crontab else command
+    existing_crontab_match = existing_crontab["command"] if existing_crontab else command
 
     exists = existing_crontab is not None
-    exists_name = existing_crontab is not None and name_comment in existing_crontab["comments"]
+    exists_name = existing_crontab is not None and name_comment in existing_crontab.get(
+        "comments", ""
+    )
 
     edit_commands: list[str | StringCommand] = []
     temp_filename = host.get_temp_filename()
@@ -126,7 +121,8 @@ def crontab(
 
     # Want the cron but it doesn't exist? Append the line
     elif present and not exists:
-        if crontab:  # append a blank line if cron entries already exist
+        print("present", present, "exists", exists)
+        if ctb:  # append a blank line if cron entries already exist
             edit_commands.append("echo '' >> {0}".format(temp_filename))
         if cron_name:
             edit_commands.append(
@@ -175,7 +171,7 @@ def crontab(
             crontab_args.append("-u {0}".format(user))
 
         # List the crontab into a temporary file if it exists
-        if crontab:
+        if ctb:
             yield "crontab -l {0} > {1}".format(" ".join(crontab_args), temp_filename)
 
         # Now yield any edits
