@@ -85,13 +85,13 @@ def crontab(
     existing_crontab_match = command
 
     if not existing_crontab and cron_name:  # find the crontab by name if provided
-        for command in crontab.commands:
-            if not command["comments"]:
+        for cmd in crontab.commands:
+            if not cmd["comments"]:
                 continue
-            if name_comment in command["comments"]:
-                existing_crontab = command
-                existing_crontab_match = command["command"]
-                existing_crontab_command = command["command"]
+            if name_comment in cmd["comments"]:
+                existing_crontab = cmd
+                existing_crontab_match = cmd["command"]
+                existing_crontab_command = cmd["command"]
 
     exists = existing_crontab is not None
     exists_name = existing_crontab is not None and name_comment in existing_crontab["comments"]
