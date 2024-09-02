@@ -4,15 +4,16 @@ import os
 import re
 import shutil
 from datetime import datetime
-from tempfile import mkdtemp, mktemp
-from typing import Dict, List, Optional, Union
+from tempfile import mkdtemp
+from typing import Dict, List, Optional
 
 from dateutil.parser import parse as parse_date
 from distro import distro
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from pyinfra.api import FactBase, ShortFactBase
 from pyinfra.api.util import try_int
+from pyinfra.facts import crontab
 
 ISO_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -377,136 +378,9 @@ class Groups(FactBase[List[str]]):
         return groups
 
 
-class CrontabDict(TypedDict):
-    command: NotRequired[str]
-    # handles cases like CRON_TZ=UTC
-    env: NotRequired[str]
-    minute: NotRequired[Union[int, str]]
-    hour: NotRequired[Union[int, str]]
-    month: NotRequired[Union[int, str]]
-    day_of_month: NotRequired[Union[int, str]]
-    day_of_week: NotRequired[Union[int, str]]
-    comments: NotRequired[list[str]]
-    special_time: NotRequired[str]
-
-
-# for compatibility, also keeps a dict of command -> crontab dict
-class CrontabResult:
-    items: List[CrontabDict]
-
-    def __init__(self):
-        super().__init__()
-        self.items = []
-
-    def add_item(self, item: CrontabDict):
-        self.items.append(item)
-
-    def __getitem__(self, item) -> Optional[CrontabDict]:
-        for i in self.items:
-            if i.get("command") == item:
-                return i
-        return None
-
-    def __repr__(self):
-        return f"CrontabResult({self.items})"
-
-    # noinspection PyMethodMayBeStatic
-    def format_item(self, item: CrontabDict):
-        lines = []
-        for comment in item.get("comments", []):
-            lines.append(comment)
-
-        if "env" in item:
-            lines.append(item["env"])
-        elif "special_time" in item:
-            lines.append(f"{item['special_time']} {item['command']}")
-        else:
-            lines.append(
-                f"{item['minute']} {item['hour']} {item['day_of_month']} {item['month']} {item['day_of_week']} {item['command']}"
-            )
-        return '\n'.join(lines)
-
-    def __str__(self):
-        return '\n'.join(self.format_item(item) for item in self.items)
-
-
-_crontab_env_re = re.compile(r"^\s*([A-Z_]+)=(.*)$")
-
-
-class Crontab(FactBase[CrontabResult]):
-    """
-    Returns a dictionary of cron command -> execution time.
-
-    .. code:: python
-
-        {
-            "items": [
-                ...
-            ]
-            "/path/to/command": {
-                "minute": "*",
-                "hour": "*",
-                "month": "*",
-                "day_of_month": "*",
-                "day_of_week": "*",
-            },
-            "echo another command": {
-                "special_time": "@daily",
-            },
-        }
-    """
-
-    default = dict
-
-    def requires_command(self, user=None) -> str:
-        return "crontab"
-
-    def command(self, user=None):
-        if user:
-            return "crontab -l -u {0} || true".format(user)
-        return "crontab -l || true"
-
-    def process(self, output):
-        crons = CrontabResult()
-        current_comments = []
-
-        for line in output:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                current_comments.append(line)
-                continue
-
-            if line.startswith("@"):
-                special_time, command = line.split(None, 1)
-                item = CrontabDict(
-                    command=command,
-                    special_time=special_time,
-                    comments=current_comments,
-                )
-                crons.add_item(item)
-
-            elif _crontab_env_re.match(line):
-                # handle environment variables
-                item = CrontabDict(
-                    env=line,
-                    comments=current_comments,
-                )
-                crons.add_item(item)
-            else:
-                minute, hour, day_of_month, month, day_of_week, command = line.split(None, 5)
-                item = CrontabDict(
-                    command=command,
-                    minute=try_int(minute),
-                    hour=try_int(hour),
-                    month=try_int(month),
-                    day_of_month=try_int(day_of_month),
-                    day_of_week=try_int(day_of_week),
-                    comments=current_comments,
-                )
-                crons.add_item(item)
-
-            current_comments = []
-        return crons
+# for compatibility
+CrontabDict = crontab.CrontabDict
+Crontab = crontab.Crontab
 
 
 class Users(FactBase):
@@ -669,7 +543,7 @@ class LinuxDistribution(FactBase[LinuxDistributionDict]):
 
             for filename, content in parts.items():
                 with open(
-                        os.path.join(temp_etc_dir, os.path.basename(filename)), "w", encoding="utf-8"
+                    os.path.join(temp_etc_dir, os.path.basename(filename)), "w", encoding="utf-8"
                 ) as fp:
                     fp.write(content)
 
