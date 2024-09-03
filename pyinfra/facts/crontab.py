@@ -1,5 +1,5 @@
 import re
-from typing import TypedDict, Union, List, Optional
+from typing import List, Optional, TypedDict, Union
 
 from typing_extensions import NotRequired
 

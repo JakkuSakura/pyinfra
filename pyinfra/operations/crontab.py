@@ -6,9 +6,7 @@ from pyinfra import host
 from pyinfra.api import StringCommand, operation
 from pyinfra.api.util import try_int
 from pyinfra.facts.crontab import CrontabFile
-from pyinfra.facts.server import (
-    Crontab,
-)
+from pyinfra.facts.server import Crontab
 from pyinfra.operations.util.files import sed_replace
 
 

@@ -16,7 +16,6 @@ from pyinfra.api import FunctionCommand, OperationError, StringCommand, operatio
 from pyinfra.api.util import try_int
 from pyinfra.connectors.util import remove_any_sudo_askpass_file
 from pyinfra.facts.files import Directory, FindInFile, Link
-from pyinfra.operations import crontab as crontab_
 from pyinfra.facts.server import (
     Groups,
     Home,
@@ -29,6 +28,7 @@ from pyinfra.facts.server import (
     Users,
     Which,
 )
+from pyinfra.operations import crontab as crontab_
 
 from . import (
     apk,
