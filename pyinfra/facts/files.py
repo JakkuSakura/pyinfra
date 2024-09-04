@@ -322,18 +322,19 @@ class FindFilesBase(FactBase):
     def process(self, output):
         return output
 
-    def command(self,
-                path: str,
-                size: Optional[str | int] = None,
-                min_size: Optional[str | int] = None,
-                max_size: Optional[str | int] = None,
-                maxdepth: Optional[int] = None,
-                fname: Optional[str] = None,
-                iname: Optional[str] = None,
-                regex: Optional[str] = None,
-                args: List[str] = [],
-                quote_path=True
-                ):
+    def command(
+        self,
+        path: str,
+        size: Optional[str | int] = None,
+        min_size: Optional[str | int] = None,
+        max_size: Optional[str | int] = None,
+        maxdepth: Optional[int] = None,
+        fname: Optional[str] = None,
+        iname: Optional[str] = None,
+        regex: Optional[str] = None,
+        args: List[str] = [],
+        quote_path=True,
+    ):
         """
         @param path: the path to start the search from
         @param size: exact size in bytes or human-readable format.
