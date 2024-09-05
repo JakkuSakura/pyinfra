@@ -333,7 +333,7 @@ class FindFilesBase(FactBase):
         fname: Optional[str] = None,
         iname: Optional[str] = None,
         regex: Optional[str] = None,
-        args: List[str] = [],
+        args: List[str] = None,
         quote_path=True,
     ):
         """
@@ -355,7 +355,8 @@ class FindFilesBase(FactBase):
         @param quote_path: if the path should be quoted
         @return:
         """
-
+        if args is None:
+            args = []
         """
         Why we need special handling for size:
         https://unix.stackexchange.com/questions/275925/why-does-find-size-1g-not-find-any-files
