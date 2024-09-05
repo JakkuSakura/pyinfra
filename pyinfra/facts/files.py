@@ -343,7 +343,7 @@ class FindFilesBase(FactBase):
         @param min_size: minimum size in bytes or human-readable format
         @param max_size: maximum size in bytes or human-readable format
         @param maxdepth: maximum depth to descend to
-        @param fname: True if the last component of the pathname being examined matches pattern.
+        @param name: True if the last component of the pathname being examined matches pattern.
                       Special shell pattern matching characters (“[”, “]”, “*”, and “?”)
                       may be used as part of pattern.
                       These characters may be matched explicitly
