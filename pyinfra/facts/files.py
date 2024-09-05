@@ -371,16 +371,20 @@ class FindFilesBase(FactBase):
             args.append("-size {0}c".format(parse_size(size)))
         if maxdepth is not None:
             args.append("-maxdepth {0}".format(maxdepth))
+
+        def maybe_quote(value):
+            return shlex.quote(value) if quote_path else value
+
         if fname is not None:
-            args.append("-name {0}".format(QuoteString(fname)))
+            args.append("-name {0}".format(maybe_quote(fname)))
         if iname is not None:
-            args.append("-iname {0}".format(QuoteString(iname)))
+            args.append("-iname {0}".format(maybe_quote(iname)))
         if regex is not None:
-            args.append("-regex {0}".format(QuoteString(regex)))
+            args.append("-regex {0}".format(maybe_quote(regex)))
 
         return make_formatted_string_command(
-            "find {0} -type {type_flag} {args} || true",
-            QuoteString(path) if quote_path else path,
+            "find {path} -type {type_flag} {args} || true",
+            path=maybe_quote(path),
             type_flag=self.type_flag,
             args=args,
         )
