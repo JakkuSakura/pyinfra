@@ -1,8 +1,10 @@
 {
     "arg": "mydir",
-    "command": "find mydir -type f || true",
+    "command": "find mydir -type f  || true",
     "output": [
         "myfile"
     ],
-    "fact": ["myfile"]
+    "fact": [
+        "myfile"
+    ]
 }
