@@ -385,7 +385,7 @@ class FindFilesBase(FactBase):
             "find {path} -type {type_flag} || true",
             path=maybe_quote(path),
             type_flag=self.type_flag,
-            args=args,
+            args=' '.join(args),
         )
 
 
