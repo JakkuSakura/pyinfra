@@ -359,7 +359,7 @@ class FindFilesBase(FactBase):
         if args is None:
             args = []
         def maybe_quote(value):
-            return shlex.quote(value) if quote_path else value
+            return QuoteString(value) if quote_path else value
         command = [
             'find',
             maybe_quote(path),
