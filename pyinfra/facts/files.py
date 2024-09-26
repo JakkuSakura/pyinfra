@@ -5,7 +5,6 @@ The files facts provide information about the filesystem and it's contents on th
 from __future__ import annotations
 
 import re
-import shlex
 import stat
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -358,12 +357,14 @@ class FindFilesBase(FactBase):
         """
         if args is None:
             args = []
+
         def maybe_quote(value):
             return QuoteString(value) if quote_path else value
+
         command = [
-            'find',
+            "find",
             maybe_quote(path),
-            '-type',
+            "-type",
             self.type_flag,
         ]
 
@@ -374,39 +375,37 @@ class FindFilesBase(FactBase):
         If we use any units other than 'c', it has a weird rounding behavior,
         and is implementation-specific. So, we always use 'c'
         """
-        if '-size' not in args:
+        if "-size" not in args:
             if min_size is not None:
-                command.append('-size')
-                command.append('+{0}c'.format(parse_size(min_size)))
+                command.append("-size")
+                command.append("+{0}c".format(parse_size(min_size)))
 
             if max_size is not None:
-                command.append('-size')
-                command.append('-{0}c'.format(parse_size(max_size)))
+                command.append("-size")
+                command.append("-{0}c".format(parse_size(max_size)))
 
             if size is not None:
-                command.append('-size')
-                command.append('{0}c'.format(size))
+                command.append("-size")
+                command.append("{0}c".format(size))
 
+        if maxdepth is not None and "-maxdepth" not in args:
+            command.append("-maxdepth")
+            command.append("{0}".format(maxdepth))
 
-        if maxdepth is not None and '-maxdepth' not in args:
-            command.append('-maxdepth')
-            command.append('{0}'.format(maxdepth))
+        if fname is not None and "-fname" not in args:
+            command.append("-name")
+            command.append(maybe_quote(fname))
 
-        if fname is not None and '-fname' not in args:
-            command.append('-name')
-            command.append('{0}'.format(maybe_quote(fname)))
+        if iname is not None and "-iname" not in args:
+            command.append("-iname")
+            command.append(maybe_quote(iname))
 
-        if iname is not None and '-iname' not in args:
-            command.append('-iname')
-            command.append('{0}'.format(maybe_quote(iname)))
+        if regex is not None and "-regex" not in args:
+            command.append("-regex")
+            command.append(maybe_quote(regex))
 
-        if regex is not None and '-regex' not in args:
-            command.append('-regex')
-            command.append('{0}'.format(maybe_quote(regex)))
-
-
-        command.append('||')
-        command.append('true')
+        command.append("||")
+        command.append("true")
 
         return StringCommand(*command)
 
