@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from typing_extensions import Literal, NotRequired, TypedDict
 
+from pyinfra.api import StringCommand
 from pyinfra.api.command import QuoteString, make_formatted_string_command
 from pyinfra.api.facts import FactBase
 from pyinfra.api.util import try_int
@@ -357,6 +358,15 @@ class FindFilesBase(FactBase):
         """
         if args is None:
             args = []
+        def maybe_quote(value):
+            return shlex.quote(value) if quote_path else value
+        command = [
+            'find',
+            maybe_quote(path),
+            '-type',
+            self.type_flag,
+        ]
+
         """
         Why we need special handling for size:
         https://unix.stackexchange.com/questions/275925/why-does-find-size-1g-not-find-any-files
@@ -364,31 +374,41 @@ class FindFilesBase(FactBase):
         If we use any units other than 'c', it has a weird rounding behavior,
         and is implementation-specific. So, we always use 'c'
         """
-        if min_size is not None:
-            args.append("-size +{0}c".format(parse_size(min_size)))
-        if max_size is not None:
-            args.append("-size -{0}c".format(parse_size(max_size)))
-        if size is not None:
-            args.append("-size {0}c".format(parse_size(size)))
-        if maxdepth is not None:
-            args.append("-maxdepth {0}".format(maxdepth))
+        if '-size' not in args:
+            if min_size is not None:
+                command.append('-size')
+                command.append('+{0}c'.format(parse_size(min_size)))
 
-        def maybe_quote(value):
-            return shlex.quote(value) if quote_path else value
+            if max_size is not None:
+                command.append('-size')
+                command.append('-{0}c'.format(parse_size(max_size)))
 
-        if fname is not None:
-            args.append("-name {0}".format(maybe_quote(fname)))
-        if iname is not None:
-            args.append("-iname {0}".format(maybe_quote(iname)))
-        if regex is not None:
-            args.append("-regex {0}".format(maybe_quote(regex)))
+            if size is not None:
+                command.append('-size')
+                command.append('{0}c'.format(size))
 
-        return make_formatted_string_command(
-            "find {path} -type {type_flag} {args} || true",
-            path=maybe_quote(path),
-            type_flag=self.type_flag,
-            args=" ".join(args),
-        )
+
+        if maxdepth is not None and '-maxdepth' not in args:
+            command.append('-maxdepth')
+            command.append('{0}'.format(maxdepth))
+
+        if fname is not None and '-fname' not in args:
+            command.append('-name')
+            command.append('{0}'.format(maybe_quote(fname)))
+
+        if iname is not None and '-iname' not in args:
+            command.append('-iname')
+            command.append('{0}'.format(maybe_quote(iname)))
+
+        if regex is not None and '-regex' not in args:
+            command.append('-regex')
+            command.append('{0}'.format(maybe_quote(regex)))
+
+
+        command.append('||')
+        command.append('true')
+
+        return StringCommand(*command)
 
 
 class FindFiles(FindFilesBase):
