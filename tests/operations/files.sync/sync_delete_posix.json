@@ -48,7 +48,7 @@
             "path=/home/somedir/underthat": null
         },
         "files.FindFiles": {
-            "path=/home/somedir, quote_path=True": [
+            "args=None, fname=None, iname=None, max_size=None, maxdepth=None, min_size=None, path=/home/somedir, quote_path=True, regex=None, size=None": [
                 "/home/somedir/deleteme.txt",
                 "/home/somedir/nodelete.pyc"
             ],

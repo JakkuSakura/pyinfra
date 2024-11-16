@@ -5,6 +5,7 @@ The files facts provide information about the filesystem and it's contents on th
 from __future__ import annotations
 
 import re
+import shlex
 import stat
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
