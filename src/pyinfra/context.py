@@ -6,10 +6,10 @@ These variables always represent the current executing pyinfra context.
 """
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from gevent.local import local
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -19,12 +19,26 @@ if TYPE_CHECKING:
     from pyinfra.api.state import State
 
 
-class container:
+class _Container:
     module = None
 
 
+class _ContextVarContainer:
+    def __init__(self) -> None:
+        # Unique name for debugging / clarity
+        self._var: ContextVar[Any] = ContextVar(f"pyinfra_ctx_{id(self)}", default=None)
+
+    @property
+    def module(self) -> Any:
+        return self._var.get()
+
+    @module.setter
+    def module(self, value: Any) -> None:
+        self._var.set(value)
+
+
 class ContextObject:
-    _container_cls = container
+    _container_cls = _Container
     _base_cls: ModuleType
 
     def __init__(self) -> None:
@@ -86,7 +100,7 @@ class ContextObject:
 
 
 class LocalContextObject(ContextObject):
-    _container_cls = local
+    _container_cls = _ContextVarContainer
 
 
 class ContextManager:
@@ -119,10 +133,10 @@ class ContextManager:
         self.set(old_module)
 
 
-ctx_state = ContextManager("state", ContextObject)
+ctx_state = ContextManager("state", LocalContextObject)
 state: "State" = ctx_state.context
 
-ctx_inventory = ContextManager("inventory", ContextObject)
+ctx_inventory = ContextManager("inventory", LocalContextObject)
 inventory: "Inventory" = ctx_inventory.context
 
 # Config can be modified mid-deploy, so we use a local object here which

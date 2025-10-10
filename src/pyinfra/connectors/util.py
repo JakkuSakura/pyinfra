@@ -4,12 +4,12 @@ import shlex
 from dataclasses import dataclass
 from getpass import getpass
 from queue import Queue
+from threading import Thread
 from socket import timeout as timeout_error
 from subprocess import PIPE, Popen
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 import click
-import gevent
 
 from pyinfra import logger
 from pyinfra.api import MaskString, QuoteString, StringCommand
@@ -149,39 +149,41 @@ def read_output_buffers(
 ) -> CommandOutput:
     output_queue: Queue[OutputLine] = Queue()
 
-    # Iterate through outputs to get an exit status and generate desired list
-    # output, done in two greenlets so stdout isn't printed before stderr. Not
-    # attached to state.pool to avoid blocking it with 2x n-hosts greenlets.
-    stdout_reader = gevent.spawn(
-        read_buffer,
-        "stdout",
-        stdout_buffer,
-        output_queue,
-        print_output=print_output,
-        print_func=lambda line: "{0}{1}".format(print_prefix, line),
-    )
-    stderr_reader = gevent.spawn(
-        read_buffer,
-        "stderr",
-        stderr_buffer,
-        output_queue,
-        print_output=print_output,
-        print_func=lambda line: "{0}{1}".format(
-            print_prefix,
-            click.style(line, "red"),
+    stdout_reader = Thread(
+        target=read_buffer,
+        args=(
+            "stdout",
+            stdout_buffer,
+            output_queue,
         ),
+        kwargs={
+            "print_output": print_output,
+            "print_func": lambda line: f"{print_prefix}{line}",
+        },
+        daemon=True,
     )
 
-    # Wait on output, with our timeout (or None)
-    greenlets = gevent.wait((stdout_reader, stderr_reader), timeout=timeout)
+    stderr_reader = Thread(
+        target=read_buffer,
+        args=(
+            "stderr",
+            stderr_buffer,
+            output_queue,
+        ),
+        kwargs={
+            "print_output": print_output,
+            "print_func": lambda line: f"{print_prefix}{click.style(line, 'red')}",
+        },
+        daemon=True,
+    )
 
-    # Timeout doesn't raise an exception, but gevent.wait returns the greenlets
-    # which did complete. So if both haven't completed, we kill them and fail
-    # with a timeout.
-    if len(greenlets) != 2:
-        stdout_reader.kill()
-        stderr_reader.kill()
+    stdout_reader.start()
+    stderr_reader.start()
 
+    stdout_reader.join(timeout)
+    stderr_reader.join(timeout)
+
+    if stdout_reader.is_alive() or stderr_reader.is_alive():
         raise timeout_error()
 
     return CommandOutput(list(output_queue.queue))

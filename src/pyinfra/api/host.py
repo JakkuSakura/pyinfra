@@ -430,6 +430,8 @@ class Host:
 
         self.state.trigger_callbacks("host_disconnect", self)
         self.connected = False
+        if hasattr(self.state, "active_hosts"):
+            self.state.active_hosts.discard(self)
 
     def run_shell_command(self, *args, **kwargs) -> tuple[bool, CommandOutput]:
         """

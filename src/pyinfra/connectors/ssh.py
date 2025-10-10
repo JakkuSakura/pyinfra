@@ -1,37 +1,39 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import random
 import shlex
-from random import uniform
-from shutil import which
-from socket import error as socket_error, gaierror
-from time import sleep
-from typing import IO, TYPE_CHECKING, Any, Iterable, Optional, Protocol, Tuple
+import tempfile
+from dataclasses import dataclass
+from threading import Event, Thread
+from typing import IO, TYPE_CHECKING, Any, Iterable, Optional, Protocol
 
+from socket import timeout as timeout_error
+
+import asyncssh
 import click
-from paramiko import AuthenticationException, BadHostKeyException, SFTPClient, SSHException
-from paramiko.agent import Agent
+import pyinfra
 from typing_extensions import TypedDict, Unpack, override
 
 from pyinfra import logger
 from pyinfra.api.command import QuoteString, StringCommand
-from pyinfra.api.exceptions import ConnectError
+from pyinfra.api.exceptions import ConnectError, PyinfraError
 from pyinfra.api.util import get_file_io, memoize
 
 from .base import BaseConnector, DataMeta
-from .scp import SCPClient
-from .ssh_util import get_private_key, raise_connect_error
-from .sshuserclient import SSHClient
 from .util import (
     CommandOutput,
+    OutputLine,
     execute_command_with_sudo_retry,
     make_unix_command_for_host,
-    read_output_buffers,
     run_local_process,
-    write_stdin,
 )
 
 if TYPE_CHECKING:
     from pyinfra.api.arguments import ConnectorArguments
+    from pyinfra.api.host import Host
+    from pyinfra.api.state import State
 
 
 class ConnectorData(TypedDict):
@@ -50,7 +52,7 @@ class ConnectorData(TypedDict):
     ssh_known_hosts_file: str
     ssh_strict_host_key_checking: str
 
-    ssh_paramiko_connect_kwargs: dict
+    ssh_paramiko_connect_kwargs: dict  # backward compatibility name
 
     ssh_connect_retries: int
     ssh_connect_retry_min_delay: float
@@ -65,18 +67,9 @@ connector_data_meta: dict[str, DataMeta] = {
     "ssh_password": DataMeta("SSH password"),
     "ssh_key": DataMeta("SSH key filename"),
     "ssh_key_password": DataMeta("SSH key password"),
-    "ssh_allow_agent": DataMeta(
-        "Whether to use any active SSH agent",
-        True,
-    ),
-    "ssh_look_for_keys": DataMeta(
-        "Whether to look for private keys",
-        True,
-    ),
-    "ssh_forward_agent": DataMeta(
-        "Whether to enable SSH forward agent",
-        False,
-    ),
+    "ssh_allow_agent": DataMeta("Whether to use any active SSH agent", True),
+    "ssh_look_for_keys": DataMeta("Whether to look for private keys", True),
+    "ssh_forward_agent": DataMeta("Whether to enable SSH forward agent", False),
     "ssh_config_file": DataMeta("SSH config filename"),
     "ssh_known_hosts_file": DataMeta("SSH known_hosts filename"),
     "ssh_strict_host_key_checking": DataMeta(
@@ -84,7 +77,7 @@ connector_data_meta: dict[str, DataMeta] = {
         "accept-new",
     ),
     "ssh_paramiko_connect_kwargs": DataMeta(
-        "Override keyword arguments passed into Paramiko's ``SSHClient.connect``"
+        "Override keyword arguments passed into asyncssh.connect",
     ),
     "ssh_connect_retries": DataMeta("Number of tries to connect via ssh", 0),
     "ssh_connect_retry_min_delay": DataMeta(
@@ -96,7 +89,7 @@ connector_data_meta: dict[str, DataMeta] = {
         0.5,
     ),
     "ssh_file_transfer_protocol": DataMeta(
-        "Protocol to use for file transfers. Can be ``sftp`` or ``scp``.",
+        "Protocol to use for file transfers. Can be ``sftp``.",
         "sftp",
     ),
 }
@@ -104,279 +97,307 @@ connector_data_meta: dict[str, DataMeta] = {
 
 class FileTransferClient(Protocol):
     def getfo(self, remote_filename: str, fl: IO) -> Any | None:
-        """
-        Get a file from the remote host, writing to the provided file-like object.
-        """
         ...
 
     def putfo(self, fl: IO, remote_filename: str) -> Any | None:
-        """
-        Put a file to the remote host, reading from the provided file-like object.
-        """
         ...
 
 
-class SSHConnector(BaseConnector):
-    """
-    Connect to hosts over SSH. This is the default connector and all targets default
-    to this meaning you do not need to specify it - ie the following two commands
-    are identical:
+def _format_known_host(hostname: str, port: Optional[int]) -> str:
+    if port and port != 22:
+        return f"[{hostname}]:{port}"
+    return hostname
 
-    .. code:: shell
 
-        pyinfra my-host.net ...
-        pyinfra @ssh/my-host.net ...
-    """
+def _normalise_stdin(stdin: Any) -> Optional[str]:
+    if stdin is None:
+        return None
+    if isinstance(stdin, (bytes, str)):
+        return stdin.decode() if isinstance(stdin, bytes) else stdin
+    if isinstance(stdin, Iterable):
+        return "".join(str(item) for item in stdin)
+    return str(stdin)
 
-    __examples_doc__ = """
-    An inventory file (``inventory.py``) containing a single SSH target with SSH
-    forward agent enabled:
 
-    .. code:: python
+class _SFTPWrapper:
+    def __init__(self, connector: "SSHConnector") -> None:
+        self._connector = connector
 
-        hosts = [
-            ("my-host.net", {"ssh_forward_agent": True}),
-        ]
+    def getfo(self, remote_filename: str, fl: IO) -> None:
+        data = self._connector._submit(self._connector._async_read_file(remote_filename))
+        fl.write(data)
 
-    Multiple hosts sharing the same SSH username:
+    def putfo(self, fl: IO, remote_filename: str) -> None:
+        position = fl.tell()
+        fl.seek(0)
+        data = fl.read()
+        fl.seek(position)
+        if isinstance(data, str):
+            data = data.encode()
+        self._connector._submit(self._connector._async_write_file(remote_filename, data))
 
-    .. code:: python
 
-        hosts = (
-            ["my-host-1.net", "my-host-2.net"],
-            {"ssh_user": "ssh-user"},
+class _SCPWrapper:
+    def __init__(self, connector: "SSHConnector") -> None:
+        self._connector = connector
+
+    def getfo(self, remote_filename: str, fl: IO) -> None:
+        data = self._connector._submit(
+            self._connector._async_scp_download(remote_filename)
         )
+        fl.write(data)
 
-    Multiple hosts with different SSH usernames:
+    def putfo(self, fl: IO, remote_filename: str) -> None:
+        position = fl.tell() if hasattr(fl, "tell") else None
+        if hasattr(fl, "seek"):
+            fl.seek(0)
+        data = fl.read()
+        if position is not None and hasattr(fl, "seek"):
+            fl.seek(position)
+        if isinstance(data, str):
+            data = data.encode()
+        self._connector._submit(self._connector._async_scp_upload(remote_filename, data))
 
-    .. code:: python
 
-        hosts = [
-            ("my-host-1.net", {"ssh_user": "ssh-user"}),
-            ("my-host-2.net", {"ssh_user": "other-user"}),
-        ]
-    """
-
+class SSHConnector(BaseConnector):
     handles_execution = True
 
     data_cls = ConnectorData
     data_meta = connector_data_meta
     data: ConnectorData
 
-    client: Optional[SSHClient] = None
+    def __init__(self, state: "State", host: "Host"):
+        super().__init__(state, host)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: Thread | None = None
+        self._loop_ready: Event | None = None
+        self._connection: asyncssh.SSHClientConnection | None = None
+        self._sftp_client: asyncssh.SFTPClient | None = None
+        self._known_hosts_file: str | None = None
+        self._strict_host_key_checking: str = self.data["ssh_strict_host_key_checking"] or "accept-new"
+        self._transfer_protocol = (
+            self.data.get("ssh_file_transfer_protocol") or "sftp"
+        ).lower()
 
     @override
     @staticmethod
     def make_names_data(name):
-        yield "@ssh/{0}".format(name), {"ssh_hostname": name}, []
+        yield f"@ssh/{name}", {"ssh_hostname": name}, []
 
-    def make_paramiko_kwargs(self) -> dict[str, Any]:
-        kwargs = {
-            "allow_agent": False,
-            "look_for_keys": False,
-            "hostname": self.data["ssh_hostname"] or self.host.name,
-            # Overrides of SSH config via pyinfra host data
-            "_pyinfra_ssh_forward_agent": self.data["ssh_forward_agent"],
-            "_pyinfra_ssh_config_file": self.data["ssh_config_file"],
-            "_pyinfra_ssh_known_hosts_file": self.data["ssh_known_hosts_file"],
-            "_pyinfra_ssh_strict_host_key_checking": self.data["ssh_strict_host_key_checking"],
-            "_pyinfra_ssh_paramiko_connect_kwargs": self.data["ssh_paramiko_connect_kwargs"],
+    # Event loop helpers
+
+    def _ensure_loop(self) -> None:
+        if self._loop is not None:
+            return
+
+        self._loop = asyncio.new_event_loop()
+        self._loop_ready = Event()
+
+        def _run_loop() -> None:
+            assert self._loop is not None
+            asyncio.set_event_loop(self._loop)
+            assert self._loop_ready is not None
+            self._loop_ready.set()
+            self._loop.run_forever()
+
+        self._loop_thread = Thread(target=_run_loop, daemon=True)
+        self._loop_thread.start()
+        assert self._loop_ready is not None
+        self._loop_ready.wait()
+
+    def _submit(self, coro: asyncio.Future | asyncio.coroutines.Coroutine) -> Any:
+        self._ensure_loop()
+        assert self._loop is not None
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    # Connection management
+
+    def _build_connect_kwargs(self, hostname: str) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "username": self.data["ssh_user"] or None,
+            "port": int(self.data["ssh_port"]) if self.data["ssh_port"] else None,
+            "password": self.data["ssh_password"] or None,
+            "agent_forwarding": self.data["ssh_forward_agent"],
+            "login_timeout": self.state.config.CONNECT_TIMEOUT,
         }
 
-        for key, value in (
-            ("username", self.data["ssh_user"]),
-            ("port", int(self.data["ssh_port"] or 0)),
-            ("timeout", self.state.config.CONNECT_TIMEOUT),
-        ):
-            if value:
-                kwargs[key] = value
-
-        # Password auth (boo!)
-        ssh_password = self.data["ssh_password"]
-        if ssh_password:
-            kwargs["password"] = ssh_password
-
-        # Key auth!
         ssh_key = self.data["ssh_key"]
-        if ssh_key:
-            kwargs["pkey"] = get_private_key(
-                self.state,
-                key_filename=ssh_key,
-                key_password=self.data["ssh_key_password"],
-            )
+        ssh_key_password = self.data["ssh_key_password"]
 
-        # No key or password, so let's have paramiko look for SSH agents and user keys
-        # unless disabled by the user.
-        else:
-            kwargs["allow_agent"] = self.data["ssh_allow_agent"]
-            kwargs["look_for_keys"] = self.data["ssh_look_for_keys"]
+        if ssh_key:
+            key = self._load_private_key(ssh_key, ssh_key_password)
+            kwargs["client_keys"] = [key]
+        elif not self.data["ssh_look_for_keys"]:
+            kwargs["client_keys"] = []
+
+        if not self.data["ssh_allow_agent"]:
+            kwargs["agent_path"] = ()
+
+        ssh_config_file = self.data["ssh_config_file"]
+        if ssh_config_file:
+            try:
+                kwargs["config"] = asyncssh.read_ssh_config(ssh_config_file)
+            except FileNotFoundError:
+                raise ConnectError(f"SSH config file not found: {ssh_config_file}")
+
+        self._known_hosts_file = self.data["ssh_known_hosts_file"] or None
+
+        strict_setting = (self.data["ssh_strict_host_key_checking"] or "accept-new").lower()
+        if strict_setting in {"no", "off"}:
+            kwargs["known_hosts"] = None
+        elif strict_setting == "accept-new":
+            if self._known_hosts_file and os.path.isfile(self._known_hosts_file):
+                kwargs["known_hosts"] = self._known_hosts_file
+            else:
+                kwargs["known_hosts"] = None
+        else:  # "yes" / default strict
+            kwargs["known_hosts"] = self._known_hosts_file or None
+
+        extra_kwargs = self.data.get("ssh_paramiko_connect_kwargs") or {}
+        kwargs.update(extra_kwargs)
+
+        if kwargs.get("port") is None:
+            kwargs.pop("port")
 
         return kwargs
 
-    @override
-    def connect(self) -> None:
-        retries = self.data["ssh_connect_retries"]
+    def _load_private_key(self, key_filename: str, key_password: str) -> asyncssh.SSHKey:
+        if key_filename in self.state.private_keys:
+            return self.state.private_keys[key_filename]
 
-        try:
+        candidate_paths = []
+        if self.state.cwd:
+            candidate_paths.append(os.path.join(self.state.cwd, key_filename))
+        candidate_paths.append(os.path.expanduser(key_filename))
+
+        for filename in candidate_paths:
+            if not os.path.isfile(filename):
+                continue
+
+            passphrase = key_password
+
             while True:
                 try:
-                    return self._connect()
-                except (SSHException, gaierror, socket_error, EOFError):
-                    if retries == 0:
-                        raise
-                    retries -= 1
-                    min_delay = self.data["ssh_connect_retry_min_delay"]
-                    max_delay = self.data["ssh_connect_retry_max_delay"]
-                    sleep(uniform(min_delay, max_delay))
-        except SSHException as e:
-            raise_connect_error(self.host, "SSH error", e)
-        except gaierror as e:
-            raise_connect_error(self.host, "Could not resolve hostname", e)
-        except socket_error as e:
-            raise_connect_error(self.host, "Could not connect", e)
-        except EOFError as e:
-            raise_connect_error(self.host, "EOF error", e)
+                    key = asyncssh.read_private_key(filename, passphrase=passphrase)
+                    self.state.private_keys[key_filename] = key
+                    return key
+                except asyncssh.KeyImportError as exc:  # encrypted key without passphrase
+                    if "encrypted" not in str(exc).lower():
+                        break
 
-    def _connect(self) -> None:
-        """
-        Connect to a single host. Returns the SSH client if successful. Stateless by
-        design so can be run in parallel.
-        """
+                    if passphrase:
+                        break
 
-        kwargs = self.make_paramiko_kwargs()
-        hostname = kwargs.pop("hostname")
+                    if pyinfra.is_cli:
+                        passphrase = click.prompt(
+                            f"Enter password for private key: {key_filename}",
+                            hide_input=True,
+                        )
+                    else:
+                        raise PyinfraError(
+                            "Private key file ({0}) is encrypted, set ssh_key_password to use this key".format(
+                                key_filename,
+                            ),
+                        )
+
+        raise PyinfraError(f"No such private key file: {key_filename}")
+
+    def connect(self) -> None:
+        hostname = self.data["ssh_hostname"] or self.host.name
+        if self._transfer_protocol not in {"sftp", "scp"}:
+            raise ConnectError(
+                f"Unsupported file transfer protocol: {self._transfer_protocol}"
+            )
+        kwargs = self._build_connect_kwargs(hostname)
         logger.debug("Connecting to: %s (%r)", hostname, kwargs)
 
-        self.client = SSHClient()
-
         try:
-            self.client.connect(hostname, **kwargs)
-        except AuthenticationException as e:
-            auth_kwargs = {}
+            self._connection = self._submit(self._async_connect(hostname, kwargs))
+        except (asyncssh.Error, OSError) as exc:
+            raise ConnectError(f"SSH error connecting to {hostname}: {exc}")
 
-            for key, value in kwargs.items():
-                if key in ("username", "password"):
-                    auth_kwargs[key] = value
-                    continue
+    async def _async_connect(self, hostname: str, kwargs: dict[str, Any]) -> asyncssh.SSHClientConnection:
+        retries = self.data["ssh_connect_retries"]
+        delay_min = self.data["ssh_connect_retry_min_delay"]
+        delay_max = self.data["ssh_connect_retry_max_delay"]
 
-                if key == "pkey" and value:
-                    auth_kwargs["key"] = self.data["ssh_key"]
-
-            auth_args = ", ".join(
-                "{0}={1}".format(key, value) for key, value in auth_kwargs.items()
-            )
-
-            raise_connect_error(self.host, "Authentication error ({0})".format(auth_args), e)
-
-        except BadHostKeyException as e:
-            remove_entry = e.hostname
-            port = self.client._ssh_config.get("port", 22)
-            if port != 22:
-                remove_entry = f"[{e.hostname}]:{port}"
-
-            logger.warning("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!")
-            logger.warning(
-                ("Someone could be eavesdropping on you right now (man-in-the-middle attack)!"),
-            )
-            logger.warning("If this is expected, you can remove the bad key using:")
-            logger.warning(f"    ssh-keygen -R {remove_entry}")
-
-            raise_connect_error(
-                self.host,
-                "SSH host key error",
-                f"Host key for {e.hostname} does not match.",
-            )
-
-        except SSHException as e:
-            if self._retry_paramiko_agent_keys(hostname, kwargs, e):
-                return
-            raise
-
-    @override
-    def disconnect(self) -> None:
-        self.get_file_transfer_connection.cache.clear()
-
-    def _retry_paramiko_agent_keys(
-        self,
-        hostname: str,
-        kwargs: dict[str, Any],
-        error: SSHException,
-    ) -> bool:
-        # Workaround for Paramiko multi-key bug (paramiko/paramiko#1390).
-        if "no existing session" not in str(error).lower():
-            return False
-
-        if not kwargs.get("allow_agent"):
-            return False
-
-        try:
-            agent_keys = list(Agent().get_keys())
-        except Exception:
-            return False
-
-        if not agent_keys:
-            return False
-
-        # Skip the first agent key, since Paramiko already attempted it
-        attempt_keys = agent_keys[1:] if len(agent_keys) > 1 else agent_keys
-
-        for agent_key in attempt_keys:
-            if self.client is not None:
-                try:
-                    self.client.close()
-                except Exception:
-                    pass
-
-            self.client = SSHClient()
-
-            single_key_kwargs = dict(kwargs)
-            single_key_kwargs["allow_agent"] = False
-            single_key_kwargs["pkey"] = agent_key
-
+        attempt = 0
+        while True:
             try:
-                self.client.connect(hostname, **single_key_kwargs)
-                return True
-            except AuthenticationException:
-                continue
-            except SSHException as retry_error:
-                if "no existing session" in str(retry_error).lower():
-                    continue
-                raise retry_error
+                connection = await asyncssh.connect(hostname, **kwargs)
+                strict_setting = (self._strict_host_key_checking or "accept-new").lower()
+                if strict_setting == "accept-new" and self._known_hosts_file:
+                    await self._store_host_key(connection, hostname, kwargs.get("port"))
+                return connection
+            except (asyncssh.Error, OSError):
+                attempt += 1
+                if attempt > retries:
+                    raise
+                await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        return False
+    async def _store_host_key(
+        self,
+        connection: asyncssh.SSHClientConnection,
+        hostname: str,
+        port: Optional[int],
+    ) -> None:
+        if not self._known_hosts_file:
+            return
 
-    @override
+        host_key = connection.get_server_host_key()
+        if host_key is None:
+            return
+
+        entry_host = _format_known_host(hostname, port)
+        export = host_key.export_public_key()
+        line = f"{entry_host} {export}\n"
+
+        os.makedirs(os.path.dirname(self._known_hosts_file), exist_ok=True)
+
+        try:
+            with open(self._known_hosts_file, "a", encoding="utf-8") as known_hosts:
+                known_hosts.write(line)
+        except OSError as exc:
+            logger.warning("Failed to write host key for %s: %s", entry_host, exc)
+
+    def disconnect(self) -> None:
+        if self._connection is None:
+            return
+
+        async def _close() -> None:
+            if self._sftp_client:
+                self._sftp_client.exit()
+                self._sftp_client = None
+            self._connection.close()
+            await self._connection.wait_closed()
+
+        try:
+            self._submit(_close())
+        finally:
+            self._connection = None
+            if self._loop and self._loop_thread:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._loop_thread.join()
+            self._loop = None
+            self._loop_thread = None
+            self._loop_ready = None
+
+    # Command execution
+
     def run_shell_command(
         self,
         command: StringCommand,
         print_output: bool = False,
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
-    ) -> Tuple[bool, CommandOutput]:
-        """
-        Execute a command on the specified host.
-
-        Args:
-            state (``pyinfra.api.State`` obj): state object for this command
-            hostname (string): hostname of the target
-            command (string): actual command to execute
-            sudo (boolean): whether to wrap the command with sudo
-            sudo_user (string): user to sudo to
-            get_pty (boolean): whether to get a PTY before executing the command
-            env (dict): environment variables to set
-            timeout (int): timeout for this command to complete before erroring
-
-        Returns:
-            tuple: (exit_code, stdout, stderr)
-            stdout and stderr are both lists of strings from each buffer.
-        """
-
+    ) -> tuple[bool, CommandOutput]:
         _get_pty = arguments.pop("_get_pty", False)
         _timeout = arguments.pop("_timeout", None)
         _stdin = arguments.pop("_stdin", None)
         _success_exit_codes = arguments.pop("_success_exit_codes", None)
 
-        def execute_command() -> Tuple[int, CommandOutput]:
+        def execute_command() -> tuple[int, CommandOutput]:
             unix_command = make_unix_command_for_host(self.state, self.host, command, **arguments)
             actual_command = unix_command.get_raw_value()
 
@@ -388,29 +409,23 @@ class SSHConnector(BaseConnector):
             )
 
             if print_input:
-                click.echo("{0}>>> {1}".format(self.host.print_prefix, unix_command), err=True)
+                click.echo(f"{self.host.print_prefix}>>> {unix_command}", err=True)
 
-            # Run it! Get stdout, stderr & the underlying channel
-            assert self.client is not None
-            stdin_buffer, stdout_buffer, stderr_buffer = self.client.exec_command(
-                actual_command,
-                get_pty=_get_pty,
-            )
+            stdin_value = _normalise_stdin(_stdin)
 
-            if _stdin:
-                write_stdin(_stdin, stdin_buffer)
-
-            combined_output = read_output_buffers(
-                stdout_buffer,
-                stderr_buffer,
-                timeout=_timeout,
-                print_output=print_output,
-                print_prefix=self.host.print_prefix,
-            )
-
-            logger.debug("Waiting for exit status...")
-            exit_status = stdout_buffer.channel.recv_exit_status()
-            logger.debug("Command exit status: %i", exit_status)
+            try:
+                exit_status, combined_output = self._submit(
+                    self._async_run_command(
+                        actual_command,
+                        stdin_value,
+                        _get_pty,
+                        _timeout,
+                        print_output,
+                        self.host.print_prefix,
+                    ),
+                )
+            except asyncio.TimeoutError as exc:
+                raise timeout_error() from exc
 
             return exit_status, combined_output
 
@@ -427,38 +442,103 @@ class SSHConnector(BaseConnector):
 
         return status, combined_output
 
-    @memoize
-    def get_file_transfer_connection(self) -> FileTransferClient | None:
-        assert self.client is not None
-        transport = self.client.get_transport()
-        assert transport is not None, "No transport"
+    async def _async_run_command(
+        self,
+        command: str,
+        stdin_value: Optional[str],
+        get_pty: bool,
+        timeout: Optional[int],
+        print_output: bool,
+        print_prefix: str,
+    ) -> tuple[int, CommandOutput]:
+        assert self._connection is not None, "SSH connection not initialised"
+
         try:
-            if self.data["ssh_file_transfer_protocol"] == "sftp":
-                logger.debug("Using SFTP for file transfer")
-                return SFTPClient.from_transport(transport)
-            elif self.data["ssh_file_transfer_protocol"] == "scp":
-                logger.debug("Using SCP for file transfer")
-                return SCPClient(transport)
-            else:
-                raise ConnectError(
-                    "Unsupported file transfer protocol: {0}".format(
-                        self.data["ssh_file_transfer_protocol"],
-                    ),
-                )
-        except SSHException as e:
-            raise ConnectError(
-                (
-                    "Unable to establish SFTP connection. Check that the SFTP subsystem "
-                    "for the SSH service at {0} is enabled."
-                ).format(self.host),
-            ) from e
+            result = await self._connection.run(
+                command,
+                check=False,
+                term_type="xterm" if get_pty else None,
+                input=stdin_value,
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise
 
-    def _get_file(self, remote_filename: str, filename_or_io: str | IO):
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+
+        combined_lines: list[OutputLine] = []
+
+        for line in stdout.splitlines():
+            if print_output:
+                click.echo(f"{print_prefix}{line}", err=True)
+            combined_lines.append(OutputLine("stdout", line))
+
+        for line in stderr.splitlines():
+            if print_output:
+                click.echo(f"{print_prefix}{click.style(line, 'red')}", err=True)
+            combined_lines.append(OutputLine("stderr", line))
+
+        return result.exit_status, CommandOutput(combined_lines)
+
+    # File transfer helpers
+
+    async def _ensure_sftp(self) -> asyncssh.SFTPClient:
+        assert self._connection is not None, "SSH connection not initialised"
+        if self._sftp_client is None:
+            self._sftp_client = await self._connection.start_sftp_client()
+        return self._sftp_client
+
+    async def _async_read_file(self, remote_filename: str) -> bytes:
+        sftp = await self._ensure_sftp()
+        async with sftp.open(remote_filename, "rb") as remote_file:
+            return await remote_file.read()
+
+    async def _async_write_file(self, remote_filename: str, data: bytes) -> None:
+        sftp = await self._ensure_sftp()
+        async with sftp.open(remote_filename, "wb") as remote_file:
+            await remote_file.write(data)
+
+    async def _async_scp_upload(self, remote_filename: str, data: bytes) -> None:
+        assert self._connection is not None, "SSH connection not initialised"
+
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(data)
+            temp_file.flush()
+            temp_path = temp_file.name
+
+        try:
+            await asyncssh.scp(temp_path, (self._connection, remote_filename))
+        finally:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+    async def _async_scp_download(self, remote_filename: str) -> bytes:
+        assert self._connection is not None, "SSH connection not initialised"
+
+        basename = os.path.basename(remote_filename.rstrip("/")) or "pyinfra-download"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = os.path.join(temp_dir, basename)
+            await asyncssh.scp((self._connection, remote_filename), local_path)
+            with open(local_path, "rb") as local_file:
+                return local_file.read()
+
+    @memoize
+    def get_file_transfer_connection(self) -> FileTransferClient:
+        if self._transfer_protocol == "scp":
+            return _SCPWrapper(self)
+        return _SFTPWrapper(self)
+
+    def _get_file(self, remote_filename: str, filename_or_io: str | IO) -> None:
+        if self._transfer_protocol == "scp":
+            data = self._submit(self._async_scp_download(remote_filename))
+        else:
+            data = self._submit(self._async_read_file(remote_filename))
         with get_file_io(filename_or_io, "wb") as file_io:
-            sftp = self.get_file_transfer_connection()
-            sftp.getfo(remote_filename, file_io)
+            file_io.write(data)
 
-    @override
     def get_file(
         self,
         remote_filename: str,
@@ -468,23 +548,12 @@ class SSHConnector(BaseConnector):
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> bool:
-        """
-        Download a file from the remote host using SFTP. Supports download files
-        with sudo by copying to a temporary directory with read permissions,
-        downloading and then removing the copy.
-        """
-
         _sudo = arguments.get("_sudo", False)
         _su_user = arguments.get("_su_user", None)
 
         if _sudo or _su_user:
-            # Get temp file location
             temp_file = remote_temp_filename or self.host.get_temp_filename(remote_filename)
-
-            # Copy the file to the tempfile location and add read permissions
-            command = StringCommand(
-                "cp", remote_filename, temp_file, "&&", "chmod", "+r", temp_file
-            )
+            command = StringCommand("cp", remote_filename, temp_file, "&&", "chmod", "+r", temp_file)
 
             copy_status, output = self.run_shell_command(
                 command,
@@ -494,58 +563,36 @@ class SSHConnector(BaseConnector):
             )
 
             if copy_status is False:
-                logger.error("File download copy temp error: {0}".format(output.stderr))
+                logger.error("File download copy temp error: %s", output.stderr)
                 return False
 
             try:
                 self._get_file(temp_file, filename_or_io)
-
-            # Ensure that, even if we encounter an error, we (attempt to) remove the
-            # temporary copy of the file.
             finally:
-                remove_status, output = self.run_shell_command(
+                self.run_shell_command(
                     StringCommand("rm", "-f", temp_file),
                     print_output=print_output,
                     print_input=print_input,
                     **arguments,
                 )
-
-            if remove_status is False:
-                logger.error("File download remove temp error: {0}".format(output.stderr))
-                return False
-
         else:
             self._get_file(remote_filename, filename_or_io)
 
         if print_output:
-            click.echo(
-                "{0}file downloaded: {1}".format(self.host.print_prefix, remote_filename),
-                err=True,
-            )
+            click.echo(f"{self.host.print_prefix}file downloaded: {remote_filename}", err=True)
 
         return True
 
     def _put_file(self, filename_or_io, remote_location):
-        logger.debug("Attempting upload of %s to %s", filename_or_io, remote_location)
+        with get_file_io(filename_or_io) as file_io:
+            data = file_io.read()
+            if isinstance(data, str):
+                data = data.encode()
+            if self._transfer_protocol == "scp":
+                self._submit(self._async_scp_upload(remote_location, data))
+            else:
+                self._submit(self._async_write_file(remote_location, data))
 
-        attempts = 0
-        last_e = None
-
-        while attempts < 3:
-            try:
-                with get_file_io(filename_or_io) as file_io:
-                    sftp = self.get_file_transfer_connection()
-                    sftp.putfo(file_io, remote_location)
-                return
-            except OSError as e:
-                logger.warning(f"Failed to upload file, retrying: {e}")
-                attempts += 1
-                last_e = e
-
-        if last_e is not None:
-            raise last_e
-
-    @override
     def put_file(
         self,
         filename_or_io,
@@ -555,11 +602,6 @@ class SSHConnector(BaseConnector):
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> bool:
-        """
-        Upload file-ios to the specified host using SFTP. Supports uploading files
-        with sudo by uploading to a temporary directory then moving & chowning.
-        """
-
         original_arguments = arguments.copy()
 
         _sudo = arguments.pop("_sudo", False)
@@ -568,29 +610,31 @@ class SSHConnector(BaseConnector):
         _doas_user = arguments.pop("_doas_user", False)
         _su_user = arguments.pop("_su_user", None)
 
-        # sudo/su are a little more complicated, as you can only sftp with the SSH
-        # user connected, so upload to tmp and copy/chown w/sudo and/or su_user
         if _sudo or _doas or _su_user:
-            # Get temp file location
             temp_file = remote_temp_filename or self.host.get_temp_filename(remote_filename)
             self._put_file(filename_or_io, temp_file)
 
-            # Make sure our sudo/su user can access the file
             other_user = _su_user or _sudo_user or _doas_user
             if other_user:
                 status, output = self.run_shell_command(
                     StringCommand("setfacl", "-m", f"u:{other_user}:r", temp_file),
                     print_output=print_output,
                     print_input=print_input,
-                    **arguments,
+                    **original_arguments,
                 )
-
                 if status is False:
-                    logger.error("Error on handover to sudo/su user: {0}".format(output.stderr))
+                    logger.error("Unable to set ACL for temp file: %s", output.stderr)
                     return False
 
-            # Execute run_shell_command w/sudo, etc
-            command = StringCommand("cp", temp_file, QuoteString(remote_filename))
+            command = StringCommand(
+                "mv",
+                temp_file,
+                remote_filename,
+                "&&",
+                "chmod",
+                "0644",
+                remote_filename,
+            )
 
             status, output = self.run_shell_command(
                 command,
@@ -600,49 +644,31 @@ class SSHConnector(BaseConnector):
             )
 
             if status is False:
-                logger.error("File upload error: {0}".format(output.stderr))
+                logger.error("File upload error: %s", output.stderr)
                 return False
 
-            # Delete the temporary file now that we've successfully copied it
-            command = StringCommand("rm", "-f", temp_file)
-
-            status, output = self.run_shell_command(
-                command,
-                print_output=print_output,
-                print_input=print_input,
-                **arguments,
-            )
-
-            if status is False:
-                logger.error("Unable to remove temporary file: {0}".format(output.stderr))
-                return False
-
-        # No sudo and no su_user, so just upload it!
         else:
             self._put_file(filename_or_io, remote_filename)
 
         if print_output:
-            click.echo(
-                "{0}file uploaded: {1}".format(self.host.print_prefix, remote_filename),
-                err=True,
-            )
+            click.echo(f"{self.host.print_prefix}file uploaded: {remote_filename}", err=True)
 
         return True
 
-    @override
+    # Rsync support remains shell-based
+
     def check_can_rsync(self) -> None:
         if self.data["ssh_key_password"]:
-            raise NotImplementedError(
-                "Rsync does not currently work with SSH keys needing passwords."
-            )
+            raise NotImplementedError("Rsync does not currently work with SSH keys needing passwords.")
 
         if self.data["ssh_password"]:
             raise NotImplementedError("Rsync does not currently work with SSH passwords.")
 
+        from shutil import which
+
         if not which("rsync"):
             raise NotImplementedError("The `rsync` binary is not available on this system.")
 
-    @override
     def rsync(
         self,
         src: str,
@@ -651,66 +677,55 @@ class SSHConnector(BaseConnector):
         print_output: bool = False,
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
-    ):
+    ) -> bool:
         _sudo = arguments.pop("_sudo", False)
         _sudo_user = arguments.pop("_sudo_user", False)
 
         hostname = self.data["ssh_hostname"] or self.host.name
         user = self.data["ssh_user"]
-        if user:
-            user = "{0}@".format(user)
+        user_prefix = f"{user}@" if user else ""
 
-        ssh_flags = []
-        # To avoid asking for interactive input, specify BatchMode=yes
-        ssh_flags.append("-o BatchMode=yes")
+        ssh_flags = ["-o BatchMode=yes"]
 
-        known_hosts_file = self.data["ssh_known_hosts_file"]
-        if known_hosts_file:
-            ssh_flags.append(
-                '-o \\"UserKnownHostsFile={0}\\"'.format(shlex.quote(known_hosts_file))
-            )  # never trust users
+        if self._known_hosts_file:
+            ssh_flags.append(f'-o "UserKnownHostsFile={shlex.quote(self._known_hosts_file)}"')
 
-        strict_host_key_checking = self.data["ssh_strict_host_key_checking"]
-        if strict_host_key_checking:
-            ssh_flags.append(
-                '-o \\"StrictHostKeyChecking={0}\\"'.format(shlex.quote(strict_host_key_checking))
-            )
+        strict_setting = (self._strict_host_key_checking or "accept-new").lower()
+        ssh_flags.append(f'-o "StrictHostKeyChecking={shlex.quote(strict_setting)}"')
 
         ssh_config_file = self.data["ssh_config_file"]
         if ssh_config_file:
-            ssh_flags.append("-F {0}".format(shlex.quote(ssh_config_file)))
+            ssh_flags.append(f"-F {shlex.quote(ssh_config_file)}")
 
         port = self.data["ssh_port"]
         if port:
-            ssh_flags.append("-p {0}".format(port))
+            ssh_flags.append(f"-p {port}")
 
         ssh_key = self.data["ssh_key"]
         if ssh_key:
-            ssh_flags.append("-i {0}".format(ssh_key))
+            ssh_flags.append(f"-i {shlex.quote(ssh_key)}")
 
         remote_rsync_command = "rsync"
         if _sudo:
             remote_rsync_command = "sudo rsync"
             if _sudo_user:
-                remote_rsync_command = "sudo -u {0} rsync".format(_sudo_user)
+                remote_rsync_command = f"sudo -u {_sudo_user} rsync"
 
         rsync_command = (
-            "rsync {rsync_flags} "
-            '--rsh "ssh {ssh_flags}" '
-            "--rsync-path '{remote_rsync_command}' "
-            "{src} {user}{hostname}:{dest}"
+            "rsync {rsync_flags} --rsh \"ssh {ssh_flags}\" --rsync-path '{remote_rsync_command}' "
+            "{src} {user_prefix}{hostname}:{dest}"
         ).format(
             rsync_flags=" ".join(flags),
             ssh_flags=" ".join(ssh_flags),
             remote_rsync_command=remote_rsync_command,
-            user=user or "",
-            hostname=hostname,
             src=src,
+            user_prefix=user_prefix,
+            hostname=hostname,
             dest=dest,
         )
 
         if print_input:
-            click.echo("{0}>>> {1}".format(self.host.print_prefix, rsync_command), err=True)
+            click.echo(f"{self.host.print_prefix}>>> {rsync_command}", err=True)
 
         return_code, output = run_local_process(
             rsync_command,
@@ -718,8 +733,7 @@ class SSHConnector(BaseConnector):
             print_prefix=self.host.print_prefix,
         )
 
-        status = return_code == 0
-        if not status:
+        if return_code != 0:
             raise IOError(output.stderr)
 
         return True

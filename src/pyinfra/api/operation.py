@@ -221,6 +221,9 @@ def add_op(state: State, op_func, *args, **kwargs):
             ),
         )
 
+    if state.current_stage < StateStage.Prepare:
+        state.set_stage(StateStage.Prepare)
+
     hosts = kwargs.pop("host", state.inventory.iter_active_hosts())
     if isinstance(hosts, Host):
         hosts = [hosts]
