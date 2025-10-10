@@ -79,6 +79,7 @@ def suspend_sync_context() -> Token:
 def get_sync_context() -> Any | None:
     return _current_sync_context.get()
 
+
 if TYPE_CHECKING:
     from pyinfra.connectors.util import CommandOutput
 

@@ -66,9 +66,7 @@ def test_sync_context_hosts_subset(fake_asyncssh):
     with SyncContext(state, hosts=[specific]):
         server.shell("echo subset")
 
-        assert any(
-            "echo subset" in command for command in fake_asyncssh["somehost"].commands_run
-        )
+        assert any("echo subset" in command for command in fake_asyncssh["somehost"].commands_run)
         assert "anotherhost" not in fake_asyncssh
 
     assert state.current_stage == StateStage.Disconnect

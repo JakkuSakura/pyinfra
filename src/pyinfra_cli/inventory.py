@@ -343,14 +343,21 @@ def make_inventory_from_files(
         groups[name] = ([], data)
 
     return Inventory(groups.pop("all"), override_data=override_data, **groups)
+
+
 @lru_cache(maxsize=1)
 def _load_default_ssh_config():
     config_path = path.expanduser("~/.ssh/config")
     if not path.exists(config_path):
         return None
 
+    read_config = getattr(asyncssh, "read_ssh_config", None)
+    if read_config is None:
+        logger.debug("asyncssh.read_ssh_config is unavailable")
+        return None
+
     try:
-        return asyncssh.read_ssh_config(config_path)
+        return read_config(config_path)
     except (OSError, asyncssh.Error) as exc:
         logger.debug("Failed to load SSH config at %s: %s", config_path, exc)
         return None

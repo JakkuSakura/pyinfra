@@ -165,10 +165,17 @@ async def get_facts_async(state, *args, **kwargs):
     ]
 
     with progress_spinner(hosts) as progress:
-        for task, host in task_to_host:
-            task.add_done_callback(lambda _task, h=host: progress(h))
 
-        task_results = await asyncio.gather(
+        def _make_progress_callback(target_host: "Host") -> Callable[[asyncio.Future[Any]], None]:
+            def _callback(_task: asyncio.Future[Any]) -> None:
+                progress(target_host)
+
+            return _callback
+
+        for task, host in task_to_host:
+            task.add_done_callback(_make_progress_callback(host))
+
+        task_results: list[BaseException | Any] = await asyncio.gather(
             *(task for task, _ in task_to_host),
             return_exceptions=True,
         )

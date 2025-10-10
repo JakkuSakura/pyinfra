@@ -15,7 +15,11 @@ def test_get_facts_runs_commands(fake_asyncssh):
     connect_all(state)
 
     for connection in fake_asyncssh.values():
-        connection.command_results["echo fact"] = {"stdout": "value\n", "stderr": "", "exit_status": 0}
+        connection.command_results["echo fact"] = {
+            "stdout": "value\n",
+            "stderr": "",
+            "exit_status": 0,
+        }
 
     result = get_facts(state, Command, ("echo fact",))
 

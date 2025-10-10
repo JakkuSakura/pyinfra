@@ -5,9 +5,17 @@ import os
 import random
 import shlex
 import tempfile
-from dataclasses import dataclass
 from threading import Event, Thread
-from typing import IO, TYPE_CHECKING, Any, Iterable, Optional, Protocol
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    Iterable,
+    Optional,
+    Protocol,
+    Coroutine,
+    TypeVar,
+)
 
 from socket import timeout as timeout_error
 
@@ -17,7 +25,7 @@ import pyinfra
 from typing_extensions import TypedDict, Unpack, override
 
 from pyinfra import logger
-from pyinfra.api.command import QuoteString, StringCommand
+from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError, PyinfraError
 from pyinfra.api.util import get_file_io, memoize
 
@@ -34,6 +42,9 @@ if TYPE_CHECKING:
     from pyinfra.api.arguments import ConnectorArguments
     from pyinfra.api.host import Host
     from pyinfra.api.state import State
+
+
+T = TypeVar("T")
 
 
 class ConnectorData(TypedDict):
@@ -96,11 +107,9 @@ connector_data_meta: dict[str, DataMeta] = {
 
 
 class FileTransferClient(Protocol):
-    def getfo(self, remote_filename: str, fl: IO) -> Any | None:
-        ...
+    def getfo(self, remote_filename: str, fl: IO) -> Any | None: ...
 
-    def putfo(self, fl: IO, remote_filename: str) -> Any | None:
-        ...
+    def putfo(self, fl: IO, remote_filename: str) -> Any | None: ...
 
 
 def _format_known_host(hostname: str, port: Optional[int]) -> str:
@@ -142,9 +151,7 @@ class _SCPWrapper:
         self._connector = connector
 
     def getfo(self, remote_filename: str, fl: IO) -> None:
-        data = self._connector._submit(
-            self._connector._async_scp_download(remote_filename)
-        )
+        data = self._connector._submit(self._connector._async_scp_download(remote_filename))
         fl.write(data)
 
     def putfo(self, fl: IO, remote_filename: str) -> None:
@@ -174,10 +181,10 @@ class SSHConnector(BaseConnector):
         self._connection: asyncssh.SSHClientConnection | None = None
         self._sftp_client: asyncssh.SFTPClient | None = None
         self._known_hosts_file: str | None = None
-        self._strict_host_key_checking: str = self.data["ssh_strict_host_key_checking"] or "accept-new"
-        self._transfer_protocol = (
-            self.data.get("ssh_file_transfer_protocol") or "sftp"
-        ).lower()
+        self._strict_host_key_checking: str = (
+            self.data["ssh_strict_host_key_checking"] or "accept-new"
+        )
+        self._transfer_protocol = (self.data.get("ssh_file_transfer_protocol") or "sftp").lower()
 
     @override
     @staticmethod
@@ -205,7 +212,7 @@ class SSHConnector(BaseConnector):
         assert self._loop_ready is not None
         self._loop_ready.wait()
 
-    def _submit(self, coro: asyncio.Future | asyncio.coroutines.Coroutine) -> Any:
+    def _submit(self, coro: Coroutine[Any, Any, T]) -> T:
         self._ensure_loop()
         assert self._loop is not None
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -236,8 +243,11 @@ class SSHConnector(BaseConnector):
 
         ssh_config_file = self.data["ssh_config_file"]
         if ssh_config_file:
+            read_config = getattr(asyncssh, "read_ssh_config", None)
+            if read_config is None:
+                raise ConnectError("AsyncSSH does not provide read_ssh_config support")
             try:
-                kwargs["config"] = asyncssh.read_ssh_config(ssh_config_file)
+                kwargs["config"] = read_config(ssh_config_file)
             except FileNotFoundError:
                 raise ConnectError(f"SSH config file not found: {ssh_config_file}")
 
@@ -303,12 +313,11 @@ class SSHConnector(BaseConnector):
 
         raise PyinfraError(f"No such private key file: {key_filename}")
 
+    @override
     def connect(self) -> None:
         hostname = self.data["ssh_hostname"] or self.host.name
         if self._transfer_protocol not in {"sftp", "scp"}:
-            raise ConnectError(
-                f"Unsupported file transfer protocol: {self._transfer_protocol}"
-            )
+            raise ConnectError(f"Unsupported file transfer protocol: {self._transfer_protocol}")
         kwargs = self._build_connect_kwargs(hostname)
         logger.debug("Connecting to: %s (%r)", hostname, kwargs)
 
@@ -317,7 +326,9 @@ class SSHConnector(BaseConnector):
         except (asyncssh.Error, OSError) as exc:
             raise ConnectError(f"SSH error connecting to {hostname}: {exc}")
 
-    async def _async_connect(self, hostname: str, kwargs: dict[str, Any]) -> asyncssh.SSHClientConnection:
+    async def _async_connect(
+        self, hostname: str, kwargs: dict[str, Any]
+    ) -> asyncssh.SSHClientConnection:
         retries = self.data["ssh_connect_retries"]
         delay_min = self.data["ssh_connect_retry_min_delay"]
         delay_max = self.data["ssh_connect_retry_max_delay"]
@@ -351,7 +362,8 @@ class SSHConnector(BaseConnector):
 
         entry_host = _format_known_host(hostname, port)
         export = host_key.export_public_key()
-        line = f"{entry_host} {export}\n"
+        export_text = export.decode() if isinstance(export, bytes) else str(export)
+        line = f"{entry_host} {export_text}\n"
 
         os.makedirs(os.path.dirname(self._known_hosts_file), exist_ok=True)
 
@@ -361,30 +373,33 @@ class SSHConnector(BaseConnector):
         except OSError as exc:
             logger.warning("Failed to write host key for %s: %s", entry_host, exc)
 
+    @override
     def disconnect(self) -> None:
-        if self._connection is None:
-            return
-
         async def _close() -> None:
             if self._sftp_client:
                 self._sftp_client.exit()
                 self._sftp_client = None
-            self._connection.close()
-            await self._connection.wait_closed()
+            if self._connection is not None:
+                self._connection.close()
+                await self._connection.wait_closed()
 
-        try:
+        if self._loop is not None:
             self._submit(_close())
-        finally:
-            self._connection = None
-            if self._loop and self._loop_thread:
-                self._loop.call_soon_threadsafe(self._loop.stop)
-                self._loop_thread.join()
-            self._loop = None
-            self._loop_thread = None
-            self._loop_ready = None
+        else:
+            self._sftp_client = None
+
+        self._connection = None
+
+        if self._loop and self._loop_thread:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join()
+        self._loop = None
+        self._loop_thread = None
+        self._loop_ready = None
 
     # Command execution
 
+    @override
     def run_shell_command(
         self,
         command: StringCommand,
@@ -464,22 +479,34 @@ class SSHConnector(BaseConnector):
         except asyncio.TimeoutError:
             raise
 
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
+        stdout_value = result.stdout or ""
+        stderr_value = result.stderr or ""
+
+        if isinstance(stdout_value, bytes):
+            stdout_text = stdout_value.decode()
+        else:
+            stdout_text = stdout_value
+
+        if isinstance(stderr_value, bytes):
+            stderr_text = stderr_value.decode()
+        else:
+            stderr_text = stderr_value
 
         combined_lines: list[OutputLine] = []
 
-        for line in stdout.splitlines():
+        for line in stdout_text.splitlines():
             if print_output:
                 click.echo(f"{print_prefix}{line}", err=True)
             combined_lines.append(OutputLine("stdout", line))
 
-        for line in stderr.splitlines():
+        for line in stderr_text.splitlines():
             if print_output:
                 click.echo(f"{print_prefix}{click.style(line, 'red')}", err=True)
             combined_lines.append(OutputLine("stderr", line))
 
-        return result.exit_status, CommandOutput(combined_lines)
+        exit_status = result.exit_status if result.exit_status is not None else 0
+
+        return exit_status, CommandOutput(combined_lines)
 
     # File transfer helpers
 
@@ -539,6 +566,7 @@ class SSHConnector(BaseConnector):
         with get_file_io(filename_or_io, "wb") as file_io:
             file_io.write(data)
 
+    @override
     def get_file(
         self,
         remote_filename: str,
@@ -553,7 +581,9 @@ class SSHConnector(BaseConnector):
 
         if _sudo or _su_user:
             temp_file = remote_temp_filename or self.host.get_temp_filename(remote_filename)
-            command = StringCommand("cp", remote_filename, temp_file, "&&", "chmod", "+r", temp_file)
+            command = StringCommand(
+                "cp", remote_filename, temp_file, "&&", "chmod", "+r", temp_file
+            )
 
             copy_status, output = self.run_shell_command(
                 command,
@@ -593,6 +623,7 @@ class SSHConnector(BaseConnector):
             else:
                 self._submit(self._async_write_file(remote_location, data))
 
+    @override
     def put_file(
         self,
         filename_or_io,
@@ -657,9 +688,12 @@ class SSHConnector(BaseConnector):
 
     # Rsync support remains shell-based
 
+    @override
     def check_can_rsync(self) -> None:
         if self.data["ssh_key_password"]:
-            raise NotImplementedError("Rsync does not currently work with SSH keys needing passwords.")
+            raise NotImplementedError(
+                "Rsync does not currently work with SSH keys needing passwords."
+            )
 
         if self.data["ssh_password"]:
             raise NotImplementedError("Rsync does not currently work with SSH passwords.")
@@ -669,6 +703,7 @@ class SSHConnector(BaseConnector):
         if not which("rsync"):
             raise NotImplementedError("The `rsync` binary is not available on this system.")
 
+    @override
     def rsync(
         self,
         src: str,

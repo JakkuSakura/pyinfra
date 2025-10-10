@@ -5,7 +5,7 @@ import time
 import traceback
 from itertools import product
 from socket import error as socket_error, timeout as timeout_error
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast, Callable, Any
 
 import click
 import asyncssh
@@ -298,8 +298,7 @@ async def _run_no_wait_ops(state: "State") -> None:
 
     with progress_spinner(hosts_operations) as progress:
         tasks = [
-            asyncio.create_task(_run_host_ops(state, host, progress=progress))
-            for host in hosts
+            asyncio.create_task(_run_host_ops(state, host, progress=progress)) for host in hosts
         ]
         await asyncio.gather(*tasks)
 
@@ -345,21 +344,31 @@ async def _run_single_op(state: "State", op_hash: str) -> None:
                     for host in batch
                 ]
 
-                for task, host in task_to_host:
-                    task.add_done_callback(lambda _task, h=host: progress(h))
+                def _make_progress_callback(
+                    target_host: "Host",
+                ) -> Callable[[asyncio.Future[Any]], None]:
+                    def _callback(_task: asyncio.Future[Any]) -> None:
+                        progress(target_host)
 
-                results = await asyncio.gather(
+                    return _callback
+
+                for task, host in task_to_host:
+                    task.add_done_callback(_make_progress_callback(host))
+
+                task_results: list[BaseException | Optional[bool]] = await asyncio.gather(
                     *(task for task, _ in task_to_host),
                     return_exceptions=True,
                 )
 
                 exceptions: list[tuple["Host", BaseException]] = []
 
-                for (_task, host), result in zip(task_to_host, results, strict=True):
-                    if isinstance(result, BaseException):
-                        exceptions.append((host, result))
+                for index, (_task, host) in enumerate(task_to_host):
+                    task_result = task_results[index]
+                    if isinstance(task_result, BaseException):
+                        exceptions.append((host, task_result))
                     else:
-                        completed_results[host] = result
+                        result_bool: Optional[bool] = cast(Optional[bool], task_result)
+                        completed_results[host] = result_bool
 
                 for host, result in completed_results.items():
                     if not result:

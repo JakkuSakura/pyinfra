@@ -9,7 +9,7 @@ from io import IOBase
 from os import path
 from pathlib import Path
 from types import CodeType, FunctionType, ModuleType
-from typing import Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 import asyncio
 import click
@@ -33,6 +33,9 @@ from .exceptions import CliError, UnexpectedExternalError
 
 # Cache for compiled Python deploy code
 PYTHON_CODES: dict[str, CodeType] = {}
+
+if TYPE_CHECKING:
+    from pyinfra.api.host import Host
 
 
 def is_subdir(child, parent):
@@ -233,8 +236,15 @@ async def _parallel_load_hosts_async(state: "State", callback: Callable, name: s
     ]
 
     with progress_spinner(hosts) as progress:
+
+        def _make_progress_callback(target_host: "Host") -> Callable[[asyncio.Future[Any]], None]:
+            def _callback(_task: asyncio.Future[Any]) -> None:
+                progress(target_host)
+
+            return _callback
+
         for task, host in task_to_host:
-            task.add_done_callback(lambda _task, h=host: progress(h))
+            task.add_done_callback(_make_progress_callback(host))
 
         results = await asyncio.gather(
             *(task for task, _ in task_to_host),

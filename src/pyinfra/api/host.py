@@ -15,11 +15,11 @@ from typing import (
     overload,
 )
 from uuid import uuid4
+from logging import Logger, getLogger
 
 import click
 from typing_extensions import Unpack, override
 
-from pyinfra import logger
 from pyinfra.connectors.base import BaseConnector
 from pyinfra.connectors.util import CommandOutput, remove_any_sudo_askpass_file
 
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from pyinfra.api.arguments import AllArguments
     from pyinfra.api.inventory import Inventory
     from pyinfra.api.state import State
+
+
+LOGGER: Logger = getLogger("pyinfra")
 
 
 def extract_callable_datas(
@@ -224,11 +227,12 @@ class Host:
             self.print_prefix_padding,
         )
 
-    def log(self, message: str, log_func: Callable[[str], Any] = logger.info) -> None:
-        log_func(f"{self.print_prefix}{message}")
+    def log(self, message: str, log_func: Optional[Callable[[str], Any]] = None) -> None:
+        log_callable: Callable[[str], Any] = log_func or LOGGER.info
+        log_callable(f"{self.print_prefix}{message}")
 
     def log_styled(
-        self, message: str, log_func: Callable[[str], Any] = logger.info, **kwargs
+        self, message: str, log_func: Optional[Callable[[str], Any]] = None, **kwargs
     ) -> None:
         message_styled = click.style(message, **kwargs)
         self.log(message_styled, log_func=log_func)
@@ -241,7 +245,7 @@ class Host:
         Log a description for a noop operation.
         """
 
-        handler = logger.info if self.state.print_noop_info else logger.debug
+        handler = LOGGER.info if self.state.print_noop_info else LOGGER.debug
         handler("{0}noop: {1}".format(self.print_prefix, description))
 
     def when(self, condition: Callable[[], bool]):
@@ -281,16 +285,19 @@ class Host:
 
         # Combine any old _ifs with the new ones
         if old_deploy_kwargs and kwargs:
-            old_ifs = old_deploy_kwargs["_if"]
-            new_ifs = kwargs["_if"]
-            if old_ifs and new_ifs:
-                kwargs["_if"] = old_ifs + new_ifs
+            old_if_value = old_deploy_kwargs.get("_if")
+            new_if_value = kwargs.get("_if")
+            if old_if_value and new_if_value:
+                old_if_iter = old_if_value if isinstance(old_if_value, list) else [old_if_value]
+                new_if_iter = new_if_value if isinstance(new_if_value, list) else [new_if_value]
+                combined = [*old_if_iter, *new_if_iter]
+                kwargs["_if"] = combined
 
         # Set the new values
         self.current_deploy_name = name
         self.current_deploy_kwargs = kwargs
         self.current_deploy_data = data
-        logger.debug(
+        LOGGER.debug(
             "Starting deploy %s (args=%r, data=%r)",
             name,
             kwargs,
@@ -305,7 +312,7 @@ class Host:
         self.current_deploy_kwargs = old_deploy_kwargs
         self.current_deploy_data = old_deploy_data
 
-        logger.debug(
+        LOGGER.debug(
             "Reset deploy to %s (args=%r, data=%r)",
             old_deploy_name,
             old_deploy_kwargs,
@@ -393,7 +400,7 @@ class Host:
                         self.print_prefix,
                         click.style(e.args[0], "red"),
                     )
-                    logger.error(log_message)
+                    LOGGER.error(log_message)
 
                 self.state.trigger_callbacks("host_connect_error", self, e)
 
@@ -410,7 +417,7 @@ class Host:
                         " ({0})".format(reason),
                     )
 
-                logger.info(log_message)
+                LOGGER.info(log_message)
                 self.state.trigger_callbacks("host_connect", self)
                 self.connected = True
 
