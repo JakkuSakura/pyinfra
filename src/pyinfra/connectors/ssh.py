@@ -5,6 +5,7 @@ import os
 import random
 import shlex
 import tempfile
+import warnings
 from threading import Event, Thread
 from typing import (
     IO,
@@ -185,6 +186,7 @@ class SSHConnector(BaseConnector):
             self.data["ssh_strict_host_key_checking"] or "accept-new"
         )
         self._transfer_protocol = (self.data.get("ssh_file_transfer_protocol") or "sftp").lower()
+        self._strict_setting: str = self._strict_host_key_checking.lower()
 
     @override
     @staticmethod
@@ -220,7 +222,11 @@ class SSHConnector(BaseConnector):
 
     # Connection management
 
-    def _build_connect_kwargs(self, hostname: str) -> dict[str, Any]:
+    def _build_connect_kwargs(
+        self,
+        hostname: str,
+        strict_setting: str,
+    ) -> tuple[str, dict[str, Any]]:
         kwargs: dict[str, Any] = {
             "username": self.data["ssh_user"] or None,
             "port": int(self.data["ssh_port"]) if self.data["ssh_port"] else None,
@@ -241,36 +247,188 @@ class SSHConnector(BaseConnector):
         if not self.data["ssh_allow_agent"]:
             kwargs["agent_path"] = ()
 
+        read_config = getattr(asyncssh, "read_ssh_config", None)
+        config_files: list[str] = []
+
         ssh_config_file = self.data["ssh_config_file"]
         if ssh_config_file:
-            read_config = getattr(asyncssh, "read_ssh_config", None)
+            config_files.append(ssh_config_file)
+        else:
+            default_config = os.path.expanduser("~/.ssh/config")
+            if os.path.isfile(default_config):
+                config_files.append(default_config)
+
+        if config_files:
             if read_config is None:
-                raise ConnectError("AsyncSSH does not provide read_ssh_config support")
-            try:
-                kwargs["config"] = read_config(ssh_config_file)
-            except FileNotFoundError:
-                raise ConnectError(f"SSH config file not found: {ssh_config_file}")
+                if ssh_config_file:
+                    raise ConnectError("AsyncSSH does not provide read_ssh_config support")
+            else:
+                parsed_configs = []
+                for config_file in config_files:
+                    try:
+                        parsed_configs.append(read_config(config_file))
+                    except FileNotFoundError:
+                        if ssh_config_file:
+                            raise ConnectError(
+                                f"SSH config file not found: {config_file}"
+                            ) from None
+                if parsed_configs:
+                    kwargs["config"] = (
+                        parsed_configs[0] if len(parsed_configs) == 1 else parsed_configs
+                    )
 
-        self._known_hosts_file = self.data["ssh_known_hosts_file"] or None
+        known_hosts_data = self.data.get("ssh_known_hosts_file") or None
+        if known_hosts_data:
+            known_hosts_path = os.path.expanduser(known_hosts_data)
+        else:
+            known_hosts_path = os.path.expanduser("~/.ssh/known_hosts")
 
-        strict_setting = (self.data["ssh_strict_host_key_checking"] or "accept-new").lower()
+        self._known_hosts_file = known_hosts_path if known_hosts_path else None
+
         if strict_setting in {"no", "off"}:
             kwargs["known_hosts"] = None
-        elif strict_setting == "accept-new":
-            if self._known_hosts_file and os.path.isfile(self._known_hosts_file):
+        elif strict_setting == "yes":
+            if self._known_hosts_file:
                 kwargs["known_hosts"] = self._known_hosts_file
-            else:
-                kwargs["known_hosts"] = None
-        else:  # "yes" / default strict
-            kwargs["known_hosts"] = self._known_hosts_file or None
+        else:
+            kwargs["known_hosts"] = None
 
         extra_kwargs = self.data.get("ssh_paramiko_connect_kwargs") or {}
-        kwargs.update(extra_kwargs)
+        converted_kwargs, hostname_override = self._convert_paramiko_kwargs(extra_kwargs, kwargs)
+        if hostname_override:
+            hostname = hostname_override
+        kwargs.update(converted_kwargs)
 
         if kwargs.get("port") is None:
             kwargs.pop("port")
 
-        return kwargs
+        return hostname, kwargs
+
+    def _convert_paramiko_kwargs(
+        self,
+        paramiko_kwargs: dict[str, Any],
+        base_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        if not paramiko_kwargs:
+            return {}, None
+
+        warnings.warn(
+            "ssh_paramiko_connect_kwargs is deprecated and will be removed in a future release. "
+            "Update host data to use AsyncSSH options directly.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+        converted: dict[str, Any] = {}
+        hostname_override: str | None = None
+
+        passphrase = paramiko_kwargs.get("passphrase")
+
+        handled_keys = {
+            "hostname",
+            "username",
+            "port",
+            "password",
+            "timeout",
+            "auth_timeout",
+            "banner_timeout",
+            "allow_agent",
+            "look_for_keys",
+            "compress",
+            "key_filename",
+            "pkey",
+        }
+
+        for key in handled_keys:
+            if key not in paramiko_kwargs:
+                continue
+
+            value = paramiko_kwargs[key]
+
+            if key == "hostname" and value:
+                hostname_override = str(value)
+                continue
+
+            if key == "username" and value:
+                converted["username"] = value
+                continue
+
+            if key == "port" and value:
+                converted["port"] = int(value)
+                continue
+
+            if key == "password" and value is not None:
+                converted["password"] = value
+                continue
+
+            if key == "timeout" and value:
+                converted["connect_timeout"] = value
+                continue
+
+            if key == "auth_timeout" and value:
+                converted["login_timeout"] = value
+                continue
+
+            if key == "banner_timeout" and value:
+                converted["banner_timeout"] = value
+                continue
+
+            if key == "allow_agent":
+                if not value:
+                    converted["agent_path"] = ()
+                continue
+
+            if key == "look_for_keys":
+                if (
+                    not value
+                    and "client_keys" not in base_kwargs
+                    and "client_keys" not in converted
+                ):
+                    converted["client_keys"] = []
+                continue
+
+            if key == "compress":
+                if value:
+                    converted["compression_algs"] = ["zlib@openssh.com", "zlib"]
+                else:
+                    converted["compression_algs"] = ["none"]
+                continue
+
+            if key == "key_filename" and value:
+                filenames: Iterable[str]
+                if isinstance(value, (list, tuple, set)):
+                    filenames = [str(item) for item in value]
+                else:
+                    filenames = [str(value)]
+
+                keys: list[asyncssh.SSHKey] = []
+                for filename in filenames:
+                    keys.append(
+                        self._load_private_key(
+                            filename,
+                            passphrase or self.data["ssh_key_password"],
+                        ),
+                    )
+
+                converted["client_keys"] = keys
+                continue
+
+            if key == "pkey" and value is not None:
+                logger.warning(
+                    "Ignoring Paramiko private key object provided via ssh_paramiko_connect_kwargs; "
+                    "specify ssh_key or ssh_paramiko_connect_kwargs['key_filename'] instead.",
+                )
+                continue
+
+        passthrough = {
+            key: value
+            for key, value in paramiko_kwargs.items()
+            if key not in handled_keys and not key.startswith("_pyinfra_")
+        }
+
+        converted.update(passthrough)
+
+        return converted, hostname_override
 
     def _load_private_key(self, key_filename: str, key_password: str) -> asyncssh.SSHKey:
         if key_filename in self.state.private_keys:
@@ -318,16 +476,21 @@ class SSHConnector(BaseConnector):
         hostname = self.data["ssh_hostname"] or self.host.name
         if self._transfer_protocol not in {"sftp", "scp"}:
             raise ConnectError(f"Unsupported file transfer protocol: {self._transfer_protocol}")
-        kwargs = self._build_connect_kwargs(hostname)
+        strict_setting = (self.data["ssh_strict_host_key_checking"] or "accept-new").lower()
+        self._strict_setting = strict_setting
+        hostname, kwargs = self._build_connect_kwargs(hostname, strict_setting)
         logger.debug("Connecting to: %s (%r)", hostname, kwargs)
 
         try:
-            self._connection = self._submit(self._async_connect(hostname, kwargs))
+            self._connection = self._submit(self._async_connect(hostname, kwargs, strict_setting))
         except (asyncssh.Error, OSError) as exc:
             raise ConnectError(f"SSH error connecting to {hostname}: {exc}")
 
     async def _async_connect(
-        self, hostname: str, kwargs: dict[str, Any]
+        self,
+        hostname: str,
+        kwargs: dict[str, Any],
+        strict_setting: str,
     ) -> asyncssh.SSHClientConnection:
         retries = self.data["ssh_connect_retries"]
         delay_min = self.data["ssh_connect_retry_min_delay"]
@@ -337,9 +500,9 @@ class SSHConnector(BaseConnector):
         while True:
             try:
                 connection = await asyncssh.connect(hostname, **kwargs)
-                strict_setting = (self._strict_host_key_checking or "accept-new").lower()
-                if strict_setting == "accept-new" and self._known_hosts_file:
-                    await self._store_host_key(connection, hostname, kwargs.get("port"))
+                await self._handle_host_key_policy(
+                    connection, hostname, kwargs.get("port"), strict_setting
+                )
                 return connection
             except (asyncssh.Error, OSError):
                 attempt += 1
@@ -365,13 +528,87 @@ class SSHConnector(BaseConnector):
         export_text = export.decode() if isinstance(export, bytes) else str(export)
         line = f"{entry_host} {export_text}\n"
 
-        os.makedirs(os.path.dirname(self._known_hosts_file), exist_ok=True)
+        directory = os.path.dirname(self._known_hosts_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
 
         try:
             with open(self._known_hosts_file, "a", encoding="utf-8") as known_hosts:
                 known_hosts.write(line)
         except OSError as exc:
             logger.warning("Failed to write host key for %s: %s", entry_host, exc)
+
+    def _load_known_host_keys(self, hostname: str, port: Optional[int]) -> list[asyncssh.SSHKey]:
+        if not self._known_hosts_file:
+            return []
+
+        if not os.path.exists(self._known_hosts_file):
+            return []
+
+        try:
+            known_hosts = asyncssh.read_known_hosts(self._known_hosts_file)
+        except (OSError, asyncssh.Error) as exc:
+            logger.warning("Failed to read known_hosts file %s: %s", self._known_hosts_file, exc)
+            return []
+
+        matches = known_hosts.match(hostname, "", port)
+        matched_keys: list[asyncssh.SSHKey] = []
+        for key_group in matches[:3]:
+            matched_keys.extend(key_group)
+        return matched_keys
+
+    @staticmethod
+    def _host_keys_equal(existing_key: asyncssh.SSHKey, host_key: asyncssh.SSHKey) -> bool:
+        return existing_key.export_public_key() == host_key.export_public_key()
+
+    async def _handle_host_key_policy(
+        self,
+        connection: asyncssh.SSHClientConnection,
+        hostname: str,
+        port: Optional[int],
+        strict_setting: str,
+    ) -> None:
+        strict = (strict_setting or "accept-new").lower()
+
+        if strict in {"no", "off"}:
+            return
+
+        host_key = connection.get_server_host_key()
+        if host_key is None:
+            return
+
+        existing_keys = self._load_known_host_keys(hostname, port)
+
+        if existing_keys:
+            if any(self._host_keys_equal(key, host_key) for key in existing_keys):
+                return
+
+            connection.close()
+            await connection.wait_closed()
+            raise ConnectError("SSH host key mismatch detected; refusing connection.")
+
+        if strict == "yes":
+            connection.close()
+            await connection.wait_closed()
+            raise ConnectError(
+                "SSH host key not found in known_hosts and strict checking is enabled."
+            )
+
+        if strict == "ask":
+            if not pyinfra.is_cli:
+                connection.close()
+                await connection.wait_closed()
+                raise ConnectError(
+                    "SSH host key not found in known_hosts and interactive confirmation is unavailable."
+                )
+
+            message = f"No host key for {hostname} found in known_hosts. Do you want to accept and add it?"
+            if not click.confirm(message, default=False):
+                connection.close()
+                await connection.wait_closed()
+                raise ConnectError("User declined to accept new SSH host key.")
+
+        await self._store_host_key(connection, hostname, port)
 
     @override
     def disconnect(self) -> None:

@@ -4,9 +4,11 @@ import os
 from typing import Dict
 
 import asyncssh
+import pytest
 
 from pyinfra.api import Config, State, StringCommand
 from pyinfra.api.connect import connect_all, disconnect_all
+from pyinfra.api.exceptions import ConnectError
 
 from ..util import make_inventory
 
@@ -114,5 +116,116 @@ def test_get_file_uses_scp_protocol(fake_asyncssh, monkeypatch, tmp_path):
     destination = tmp_path / "download.txt"
     assert host.get_file("/remote/file.txt", str(destination)) is True
     assert destination.read_text() == "from-remote"
+
+    disconnect_all(state)
+
+
+def test_paramiko_kwargs_compatibility(tmp_path):
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    key_file = tmp_path / "id_test"
+    key_file.write_text(key.export_private_key().decode(), encoding="utf-8")
+
+    inventory = make_inventory(
+        override_data={
+            "ssh_paramiko_connect_kwargs": {
+                "hostname": "overridehost",
+                "username": "otheruser",
+                "password": "secret",
+                "port": 2222,
+                "timeout": 12,
+                "auth_timeout": 34,
+                "allow_agent": False,
+                "look_for_keys": False,
+                "compress": True,
+                "key_filename": str(key_file),
+            }
+        }
+    )
+
+    _state = State(inventory, Config())
+    host = inventory.get_host("somehost")
+    connector = host.connector
+
+    hostname, kwargs = connector._build_connect_kwargs(host.name, "accept-new")
+
+    assert hostname == "overridehost"
+    assert kwargs["username"] == "otheruser"
+    assert kwargs["password"] == "secret"
+    assert kwargs["port"] == 2222
+    assert kwargs["connect_timeout"] == 12
+    assert kwargs["login_timeout"] == 34
+    assert kwargs["agent_path"] == ()
+    assert kwargs["client_keys"] and len(kwargs["client_keys"]) == 1
+    assert kwargs["compression_algs"] == ["zlib@openssh.com", "zlib"]
+
+
+def test_default_ssh_config_is_loaded(fake_asyncssh, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    config_dir = home / ".ssh"
+    config_dir.mkdir(parents=True)
+    config_file = config_dir / "config"
+    config_file.write_text("Host somehost\n  User alternative\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(home))
+
+    calls: list[str] = []
+
+    class _TrackingConfig:
+        def lookup(self, hostname: str) -> Dict[str, str]:
+            return {}
+
+    def _read_config(path: str, *_args, **_kwargs):
+        calls.append(path)
+        return _TrackingConfig()
+
+    monkeypatch.setattr(asyncssh, "read_ssh_config", _read_config, raising=False)
+
+    inventory = make_inventory()
+    state = State(inventory, Config())
+
+    connect_all(state)
+
+    assert calls
+    assert set(calls) == {str(config_file)}
+
+    disconnect_all(state)
+
+
+def test_accept_new_writes_default_known_hosts(fake_asyncssh, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    inventory = make_inventory(override_data={"ssh_strict_host_key_checking": "accept-new"})
+    state = State(inventory, Config())
+
+    connect_all(state)
+
+    known_hosts_path = home / ".ssh" / "known_hosts"
+    assert known_hosts_path.exists()
+    contents = known_hosts_path.read_text()
+    assert "somehost" in contents
+
+    disconnect_all(state)
+
+
+def test_accept_new_detects_host_key_mismatch(fake_asyncssh, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    known_hosts_dir = home / ".ssh"
+    known_hosts_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    # Write a different host key to trigger mismatch detection
+    other_key = asyncssh.generate_private_key("ssh-ed25519").export_public_key().decode()
+    mismatch_line = f"somehost {other_key}\n"
+    (known_hosts_dir / "known_hosts").write_text(mismatch_line, encoding="utf-8")
+
+    inventory = make_inventory(override_data={"ssh_strict_host_key_checking": "accept-new"})
+    state = State(inventory, Config())
+
+    connect_all(state)
+
+    host = inventory.get_host("somehost")
+    assert host not in state.active_hosts
+    assert host in state.failed_hosts
 
     disconnect_all(state)
