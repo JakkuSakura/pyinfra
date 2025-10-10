@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import ExitStack
 from contextvars import Token
-from functools import partial
 from typing import Any, Iterable, Mapping
 
 from typing_extensions import Protocol
@@ -12,9 +10,9 @@ from pyinfra.api.host import Host
 from pyinfra.api.operation import (
     OperationMeta,
     execute_immediately,
-    push_async_context,
-    reset_async_context,
-    suspend_async_context,
+    push_sync_context,
+    reset_sync_context,
+    suspend_sync_context,
 )
 from pyinfra.api.state import State, StateStage
 from pyinfra.context import ctx_config, ctx_host, ctx_inventory, ctx_state
@@ -25,39 +23,8 @@ class SupportsOperation(Protocol):
         ...
 
 
-class _AsyncOperationAwaitable:
-    def __init__(
-        self,
-        context: "AsyncContext",
-        operation: SupportsOperation,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        hosts_override: Iterable[Host | str] | None,
-    ) -> None:
-        self._context = context
-        self._operation = operation
-        self._args = args
-        self._kwargs = kwargs
-        self._hosts_override = hosts_override
-
-    def __await__(self):
-        return self._run().__await__()
-
-    async def _run(self) -> Mapping[Host, OperationMeta]:
-        suspend_token = suspend_async_context()
-        try:
-            return await self._context.run_operation(
-                self._operation,
-                *self._args,
-                hosts=self._hosts_override,
-                **self._kwargs,
-            )
-        finally:
-            reset_async_context(suspend_token)
-
-
-class AsyncContext:
-    """Async helper for running individual operations or facts against hosts."""
+class SyncContext:
+    """Sync helper for running individual operations or facts against hosts."""
 
     def __init__(
         self,
@@ -94,9 +61,9 @@ class AsyncContext:
         stack.enter_context(ctx_host.use(host))
         return stack
 
-    async def __aenter__(self) -> "AsyncContext":
+    def __enter__(self) -> SyncContext:
         if self._in_context:
-            raise RuntimeError("AsyncContext is already in use as a context manager")
+            raise RuntimeError("SyncContext is already in use as a context manager")
 
         self._auto_manage_connections = True
         self._in_context = True
@@ -105,30 +72,29 @@ class AsyncContext:
             self.state.set_stage(StateStage.Connect)
 
         try:
-            await self._ensure_hosts_connected(self._default_hosts)
+            self._ensure_hosts_connected(self._default_hosts)
         except BaseException:
-            # Ensure the context flags are reset if connection setup fails
             self._auto_manage_connections = False
             self._in_context = False
             raise
 
-        self._context_token = push_async_context(self)
+        self._context_token = push_sync_context(self)
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001 - async context protocol
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001 - sync context protocol
         disconnect_error: BaseException | None = None
 
         try:
             if self._auto_manage_connections:
                 try:
-                    await self._disconnect_managed_hosts()
+                    self._disconnect_managed_hosts()
                 except BaseException as exc_disconnect:
                     disconnect_error = exc_disconnect
         finally:
             self._auto_manage_connections = False
             self._in_context = False
             if self._context_token is not None:
-                reset_async_context(self._context_token)
+                reset_sync_context(self._context_token)
                 self._context_token = None
 
         if self.state.current_stage < StateStage.Disconnect:
@@ -142,12 +108,21 @@ class AsyncContext:
         operation: SupportsOperation,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> "_AsyncOperationAwaitable":
+    ) -> Mapping[Host, OperationMeta]:
         op_kwargs = dict(kwargs)
         hosts_override = op_kwargs.pop("hosts", None)
-        return _AsyncOperationAwaitable(self, operation, args, op_kwargs, hosts_override)
+        suspend_token = suspend_sync_context()
+        try:
+            return self.run_operation(
+                operation,
+                *args,
+                hosts=hosts_override,
+                **op_kwargs,
+            )
+        finally:
+            reset_sync_context(suspend_token)
 
-    async def _ensure_hosts_connected(self, hosts: Iterable[Host]) -> None:
+    def _ensure_hosts_connected(self, hosts: Iterable[Host]) -> None:
         if not self._auto_manage_connections:
             return
 
@@ -155,83 +130,67 @@ class AsyncContext:
         if not hosts_to_connect:
             return
 
-        connect_tasks = [
-            self.state.run_in_executor(
-                partial(host.connect, reason="async context", raise_exceptions=True)
-            )
-            for host in hosts_to_connect
-        ]
-
-        results = await asyncio.gather(*connect_tasks, return_exceptions=True)
-
         successful_hosts: list[Host] = []
         errors: list[BaseException] = []
 
-        for host, result in zip(hosts_to_connect, results):
-            if isinstance(result, BaseException):
-                errors.append(result)
+        for host in hosts_to_connect:
+            try:
+                host.connect(reason="sync context", raise_exceptions=True)
+            except BaseException as exc:
+                errors.append(exc)
             else:
                 self._managed_hosts.add(host)
                 successful_hosts.append(host)
 
         if errors:
             if successful_hosts:
-                await self._disconnect_managed_hosts(successful_hosts)
+                try:
+                    self._disconnect_managed_hosts(successful_hosts)
+                except BaseException:
+                    pass
             raise errors[0]
 
-    async def _disconnect_managed_hosts(self, hosts: Iterable[Host] | None = None) -> None:
+    def _disconnect_managed_hosts(self, hosts: Iterable[Host] | None = None) -> None:
         targets = list(hosts) if hosts is not None else list(self._managed_hosts)
         if not targets:
             return
 
-        disconnect_hosts: list[Host] = []
-        disconnect_tasks = []
-
+        disconnect_error: BaseException | None = None
         for host in targets:
-            if host.connected:
-                disconnect_hosts.append(host)
-                disconnect_tasks.append(self.state.run_in_executor(host.disconnect))
-            else:
-                self._managed_hosts.discard(host)
-
-        if disconnect_tasks:
-            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
-            errors: list[BaseException] = []
-            for host, result in zip(disconnect_hosts, results):
-                self._managed_hosts.discard(host)
-                if isinstance(result, BaseException):
-                    errors.append(result)
-            if errors:
-                raise errors[0]
-
-        # Remove any hosts that were not connected (no task created) from management tracking
-        for host in set(targets) - set(disconnect_hosts):
             self._managed_hosts.discard(host)
+            if not host.connected:
+                continue
+            try:
+                host.disconnect()
+            except BaseException as exc:
+                if disconnect_error is None:
+                    disconnect_error = exc
 
-    async def run_operation(
+        if disconnect_error is not None:
+            raise disconnect_error
+
+    def run_operation(
         self,
         operation: SupportsOperation,
         *args,
         hosts: Iterable[Host | str] | None = None,
         **kwargs,
     ) -> Mapping[Host, OperationMeta]:
-        """Execute an operation immediately for each host and await completion."""
+        """Execute an operation immediately for each host."""
 
         targets = self._normalise_hosts(hosts) if hosts is not None else self._default_hosts
 
-        suspend_token = suspend_async_context()
+        suspend_token = suspend_sync_context()
         try:
-            await self._ensure_hosts_connected(targets)
+            self._ensure_hosts_connected(targets)
 
             results = {}
             for host in targets:
-                op_meta = await self.state.run_in_executor(
-                    partial(self._execute_operation, host, operation, args, kwargs)
-                )
+                op_meta = self._execute_operation(host, operation, args, kwargs)
                 results[host] = op_meta
             return results
         finally:
-            reset_async_context(suspend_token)
+            reset_sync_context(suspend_token)
 
     def _execute_operation(
         self,
@@ -264,30 +223,28 @@ class AsyncContext:
                 if not was_executing:
                     self.state.is_executing = False
 
-    async def get_fact(
+    def get_fact(
         self,
         fact_cls,
         *fact_args,
         hosts: Iterable[Host | str] | None = None,
         **fact_kwargs,
     ) -> Mapping[Host, Any]:
-        """Fetch a fact asynchronously for the selected hosts."""
+        """Fetch a fact synchronously for the selected hosts."""
 
         targets = self._normalise_hosts(hosts) if hosts is not None else self._default_hosts
 
-        suspend_token = suspend_async_context()
+        suspend_token = suspend_sync_context()
         try:
-            await self._ensure_hosts_connected(targets)
+            self._ensure_hosts_connected(targets)
 
             results = {}
             for host in targets:
-                value = await self.state.run_in_executor(
-                    partial(self._fetch_fact, host, fact_cls, fact_args, fact_kwargs)
-                )
+                value = self._fetch_fact(host, fact_cls, fact_args, fact_kwargs)
                 results[host] = value
             return results
         finally:
-            reset_async_context(suspend_token)
+            reset_sync_context(suspend_token)
 
     def _fetch_fact(
         self,

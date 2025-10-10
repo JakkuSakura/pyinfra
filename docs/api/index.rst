@@ -5,10 +5,10 @@ In addition to :doc:`the pyinfra CLI <../cli>`, pyinfra provides a full Python A
 
 You can also reference `pyinfra's own main.py <https://github.com/pyinfra-dev/pyinfra/blob/4.x/pyinfra_cli/main.py>`_, and the `pyinfra API source code <https://github.com/pyinfra-dev/pyinfra/tree/4.x/pyinfra/api>`_.
 
-Async Helpers
--------------
+Context Helpers
+---------------
 
-An async-friendly helper for running individual operations and facts is
+Async and sync helpers for running individual operations and facts are
 documented in :doc:`./async_context`.
 
 Full Example
