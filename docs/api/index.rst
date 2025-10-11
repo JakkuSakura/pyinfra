@@ -9,7 +9,7 @@ Context Helpers
 ---------------
 
 Async and sync helpers for running individual operations and facts are
-documented in :doc:`./async_context`.
+documented in :doc:`./context`.
 
 Full Example
 ------------
