@@ -4,11 +4,9 @@ import os
 from typing import Dict
 
 import asyncssh
-import pytest
 
 from pyinfra.api import Config, State, StringCommand
 from pyinfra.api.connect import connect_all, disconnect_all
-from pyinfra.api.exceptions import ConnectError
 
 from ..util import make_inventory
 
@@ -157,6 +155,26 @@ def test_paramiko_kwargs_compatibility(tmp_path):
     assert kwargs["agent_path"] == ()
     assert kwargs["client_keys"] and len(kwargs["client_keys"]) == 1
     assert kwargs["compression_algs"] == ["zlib@openssh.com", "zlib"]
+
+
+def test_private_key_certificates_are_loaded(tmp_path):
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text(key.export_private_key().decode(), encoding="utf-8")
+
+    cert_file = tmp_path / "id_ed25519-cert.pub"
+    cert_file.write_text(key.export_public_key().decode(), encoding="utf-8")
+
+    inventory = make_inventory(override_data={"ssh_key": str(key_file)})
+    _state = State(inventory, Config())
+    host = inventory.get_host("somehost")
+    connector = host.connector
+
+    _, kwargs = connector._build_connect_kwargs(host.name, "accept-new")
+
+    assert kwargs.get("client_keys")
+    assert kwargs.get("client_certs")
+    assert len(kwargs["client_certs"]) == 1
 
 
 def test_default_ssh_config_is_loaded(fake_asyncssh, tmp_path, monkeypatch):

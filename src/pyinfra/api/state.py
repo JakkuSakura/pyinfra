@@ -246,8 +246,9 @@ class State:
         max_workers = config.PARALLEL or min(len(inventory), MAX_PARALLEL) or 1
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
-        # Cached private keys (asyncssh key objects)
+        # Cached private keys (asyncssh key objects) and any associated certificates
         self.private_keys: dict[str, Any] = {}
+        self.private_key_certs: dict[str, list[Any]] = {}
 
         # Assign inventory/config
         self.inventory = inventory

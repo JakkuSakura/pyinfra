@@ -239,8 +239,10 @@ class SSHConnector(BaseConnector):
         ssh_key_password = self.data["ssh_key_password"]
 
         if ssh_key:
-            key = self._load_private_key(ssh_key, ssh_key_password)
+            key, certs = self._load_private_key(ssh_key, ssh_key_password)
             kwargs["client_keys"] = [key]
+            if certs:
+                kwargs.setdefault("client_certs", []).extend(certs)
         elif not self.data["ssh_look_for_keys"]:
             kwargs["client_keys"] = []
 
@@ -402,15 +404,18 @@ class SSHConnector(BaseConnector):
                     filenames = [str(value)]
 
                 keys: list[asyncssh.SSHKey] = []
+                certs: list[asyncssh.SSHKey] = []
                 for filename in filenames:
-                    keys.append(
-                        self._load_private_key(
-                            filename,
-                            passphrase or self.data["ssh_key_password"],
-                        ),
+                    key_obj, key_certs = self._load_private_key(
+                        filename,
+                        passphrase or self.data["ssh_key_password"],
                     )
+                    keys.append(key_obj)
+                    certs.extend(key_certs)
 
                 converted["client_keys"] = keys
+                if certs:
+                    converted.setdefault("client_certs", []).extend(certs)
                 continue
 
             if key == "pkey" and value is not None:
@@ -430,9 +435,15 @@ class SSHConnector(BaseConnector):
 
         return converted, hostname_override
 
-    def _load_private_key(self, key_filename: str, key_password: str) -> asyncssh.SSHKey:
+    def _load_private_key(
+        self,
+        key_filename: str,
+        key_password: str,
+    ) -> tuple[asyncssh.SSHKey, list[asyncssh.SSHKey]]:
         if key_filename in self.state.private_keys:
-            return self.state.private_keys[key_filename]
+            key = self.state.private_keys[key_filename]
+            certs = self.state.private_key_certs.get(key_filename, [])
+            return key, certs
 
         candidate_paths = []
         if self.state.cwd:
@@ -448,8 +459,10 @@ class SSHConnector(BaseConnector):
             while True:
                 try:
                     key = asyncssh.read_private_key(filename, passphrase=passphrase)
+                    certs = self._load_private_key_certificates(filename)
                     self.state.private_keys[key_filename] = key
-                    return key
+                    self.state.private_key_certs[key_filename] = certs
+                    return key, certs
                 except asyncssh.KeyImportError as exc:  # encrypted key without passphrase
                     if "encrypted" not in str(exc).lower():
                         break
@@ -470,6 +483,30 @@ class SSHConnector(BaseConnector):
                         )
 
         raise PyinfraError(f"No such private key file: {key_filename}")
+
+    def _load_private_key_certificates(self, key_path: str) -> list[asyncssh.SSHKey]:
+        certificates: list[asyncssh.SSHKey] = []
+
+        base_candidates = {key_path}
+        stem, ext = os.path.splitext(key_path)
+        if stem:
+            base_candidates.add(stem)
+
+        candidate_files: set[str] = set()
+        for base in base_candidates:
+            for suffix in ("-cert.pub", ".pub"):
+                candidate_files.add(f"{base}{suffix}")
+
+        for candidate in candidate_files:
+            if not os.path.isfile(candidate):
+                continue
+
+            try:
+                certificates.append(asyncssh.read_public_key(candidate))
+            except (asyncssh.KeyImportError, OSError) as exc:
+                logger.warning("Failed to load certificate %s: %s", candidate, exc)
+
+        return certificates
 
     @override
     def connect(self) -> None:
