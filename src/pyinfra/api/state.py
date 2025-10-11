@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -290,7 +291,12 @@ class State:
             raise RuntimeError("State executor not initialised")
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, partial(func, *args, **kwargs))
+        context = contextvars.copy_context()
+
+        def _call_with_context() -> T:
+            return context.run(func, *args, **kwargs)
+
+        return await loop.run_in_executor(self.executor, _call_with_context)
 
     def shutdown_executor(self, wait: bool = True) -> None:
         if self.executor is not None:

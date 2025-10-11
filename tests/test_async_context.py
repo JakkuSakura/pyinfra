@@ -5,8 +5,9 @@ import asyncio
 from pyinfra.api import Config, State
 from pyinfra.api.state import StateStage
 from pyinfra.async_context import AsyncContext
+from pyinfra.context import ctx_state
 from pyinfra.facts.server import Command
-from pyinfra.operations import server
+from pyinfra.operations import files, server
 
 from .util import make_inventory
 
@@ -82,5 +83,31 @@ def test_async_context_hosts_subset(fake_asyncssh):
 
         assert state.current_stage == StateStage.Disconnect
         assert fake_asyncssh["somehost"]._closed is True
+
+    asyncio.run(_run())
+
+
+def test_async_context_preserves_state_in_executor(fake_asyncssh, tmp_path):
+    async def _run():
+        inventory = make_inventory()
+        state = State(inventory, Config())
+
+        local_file = tmp_path / "async-context.txt"
+        local_file.write_text("async context test")
+
+        async with AsyncContext(state):
+            results = await files.put(src=str(local_file), dest="/async-context.txt")
+
+            assert set(results.keys()) == {
+                inventory.get_host("somehost"),
+                inventory.get_host("anotherhost"),
+            }
+
+            with ctx_state.use(state):
+                state_in_executor = await state.run_in_executor(ctx_state.get)
+                assert state_in_executor is state
+
+                config_in_executor = await state.run_in_executor(lambda: ctx_state.get().config)
+                assert config_in_executor is state.config
 
     asyncio.run(_run())

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pyinfra.api import Config, State
 from pyinfra.api.state import StateStage
 from pyinfra.facts.server import Command
-from pyinfra.operations import server
+from pyinfra.operations import files, server
 from pyinfra.sync_context import SyncContext
 
 from .util import make_inventory
@@ -71,3 +71,21 @@ def test_sync_context_hosts_subset(fake_asyncssh):
 
     assert state.current_stage == StateStage.Disconnect
     assert fake_asyncssh["somehost"]._closed is True
+
+
+def test_sync_context_files_put(fake_asyncssh, tmp_path):
+    inventory = make_inventory()
+    state = State(inventory, Config())
+
+    local_file = tmp_path / "sync-context.txt"
+    local_file.write_text("sync context test")
+
+    with SyncContext(state):
+        results = files.put(src=str(local_file), dest="/sync-context.txt")
+
+        assert set(results.keys()) == {
+            inventory.get_host("somehost"),
+            inventory.get_host("anotherhost"),
+        }
+
+    assert state.current_stage == StateStage.Disconnect
