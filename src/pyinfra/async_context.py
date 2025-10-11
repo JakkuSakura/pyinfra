@@ -56,6 +56,72 @@ class _AsyncOperationAwaitable:
             reset_async_context(suspend_token)
 
 
+class _AsyncDeployAwaitable:
+    def __init__(
+        self,
+        context: "AsyncContext",
+        deploy_fn,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        hosts_override: Iterable[Host | str] | None,
+    ) -> None:
+        self._context = context
+        self._deploy_fn = deploy_fn
+        self._args = args
+        self._kwargs = kwargs
+        self._hosts_override = hosts_override
+
+    def __await__(self):
+        return self._run().__await__()
+
+    async def _run(self) -> None:
+        suspend_token = suspend_async_context()
+        try:
+            await self._context.run_deploy(
+                self._deploy_fn,
+                *self._args,
+                hosts=self._hosts_override,
+                **self._kwargs,
+            )
+        finally:
+            reset_async_context(suspend_token)
+
+
+class _AsyncFactAwaitable:
+    def __init__(
+        self,
+        context: "AsyncContext",
+        host: Host,
+        fact_cls,
+        fact_args: tuple[Any, ...],
+        fact_kwargs: dict[str, Any],
+    ) -> None:
+        self._context = context
+        self._host = host
+        self._fact_cls = fact_cls
+        self._fact_args = fact_args
+        self._fact_kwargs = fact_kwargs
+
+    def __await__(self):
+        return self._run().__await__()
+
+    async def _run(self) -> Any:
+        suspend_token = suspend_async_context()
+        try:
+            await self._context._ensure_hosts_connected([self._host])
+            return await self._context.state.run_in_executor(
+                partial(
+                    self._context._fetch_fact,
+                    self._host,
+                    self._fact_cls,
+                    self._fact_args,
+                    self._fact_kwargs,
+                )
+            )
+        finally:
+            reset_async_context(suspend_token)
+
+
 class AsyncContext:
     """Async helper for running individual operations or facts against hosts."""
 
@@ -146,6 +212,26 @@ class AsyncContext:
         op_kwargs = dict(kwargs)
         hosts_override = op_kwargs.pop("hosts", None)
         return _AsyncOperationAwaitable(self, operation, args, op_kwargs, hosts_override)
+
+    def _call_wrapped_deploy(
+        self,
+        deploy_fn,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> _AsyncDeployAwaitable:
+        deploy_kwargs = dict(kwargs)
+        hosts_override = deploy_kwargs.pop("hosts", None)
+        return _AsyncDeployAwaitable(self, deploy_fn, args, deploy_kwargs, hosts_override)
+
+    def _call_wrapped_fact(
+        self,
+        host: Host,
+        fact_cls,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> _AsyncFactAwaitable:
+        fact_kwargs = dict(kwargs)
+        return _AsyncFactAwaitable(self, host, fact_cls, args, fact_kwargs)
 
     async def _ensure_hosts_connected(self, hosts: Iterable[Host]) -> None:
         if not self._auto_manage_connections:
@@ -245,6 +331,8 @@ class AsyncContext:
                 self.state.set_stage(StateStage.Prepare)
             if self.state.current_stage < StateStage.Execute:
                 self.state.set_stage(StateStage.Execute)
+            elif self.state.current_stage > StateStage.Execute:
+                self.state.current_stage = StateStage.Execute
 
             was_executing = self.state.is_executing
             if not was_executing:
@@ -298,3 +386,83 @@ class AsyncContext:
     ) -> Any:
         with self._with_context(host):
             return host.get_fact(fact_cls, *fact_args, **fact_kwargs)
+
+    async def run_deploy(
+        self,
+        deploy_fn,
+        *deploy_args,
+        hosts: Iterable[Host | str] | None = None,
+        **deploy_kwargs,
+    ) -> None:
+        """Execute a deploy coroutine immediately for the selected hosts."""
+
+        targets = self._normalise_hosts(hosts) if hosts is not None else self._default_hosts
+
+        suspend_token = suspend_async_context()
+        try:
+            await self._ensure_hosts_connected(targets)
+
+            for host in targets:
+                await self.state.run_in_executor(
+                    partial(self._execute_deploy, host, deploy_fn, deploy_args, deploy_kwargs)
+                )
+        finally:
+            reset_async_context(suspend_token)
+
+    def _execute_deploy(
+        self,
+        host: Host,
+        deploy_fn,
+        deploy_args: tuple[Any, ...],
+        deploy_kwargs: dict[str, Any],
+    ) -> None:
+        with self._with_context(host):
+            if self.state.current_stage < StateStage.Prepare:
+                self.state.set_stage(StateStage.Prepare)
+            if self.state.current_stage < StateStage.Execute:
+                self.state.set_stage(StateStage.Execute)
+            elif self.state.current_stage > StateStage.Execute:
+                self.state.current_stage = StateStage.Execute
+
+            was_executing = self.state.is_executing
+            if not was_executing:
+                self.state.is_executing = True
+
+            if host not in self.state.activated_hosts:
+                self.state.activate_host(host)
+
+            try:
+                deploy_fn(*deploy_args, **deploy_kwargs)
+            finally:
+                if not was_executing:
+                    self.state.is_executing = False
+
+
+class AsyncHostContext:
+    """Convenience wrapper around :class:`AsyncContext` for a single host."""
+
+    def __init__(self, state: State, host: Host | str) -> None:
+        self.state = state
+        self._host_arg = host
+        self.host: Host | None = None
+        self._context: AsyncContext | None = None
+
+    def _resolve_host(self) -> Host:
+        if isinstance(self._host_arg, Host):
+            return self._host_arg
+
+        resolved = self.state.inventory.get_host(self._host_arg)
+        if resolved is None:
+            raise ValueError(f"Unknown host: {self._host_arg}")
+        return resolved
+
+    async def __aenter__(self) -> AsyncContext:
+        self.host = self._resolve_host()
+        self._context = AsyncContext(self.state, hosts=[self.host])
+        return await self._context.__aenter__()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001 - async context protocol
+        if self._context is None:
+            return
+        await self._context.__aexit__(exc_type, exc, tb)
+        self._context = None

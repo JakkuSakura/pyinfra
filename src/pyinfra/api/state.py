@@ -6,7 +6,6 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
-from functools import partial
 from graphlib import CycleError, TopologicalSorter
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, TypeVar

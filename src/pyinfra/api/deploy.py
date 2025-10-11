@@ -15,6 +15,7 @@ from pyinfra.context import ctx_host, ctx_state
 
 from .arguments import pop_global_arguments
 from .arguments_typed import PyinfraOperation
+from .operation import get_async_context, get_sync_context
 from .exceptions import PyinfraError
 from .host import Host
 from .state import StateStage
@@ -86,6 +87,14 @@ def deploy(
 def _wrap_deploy(func: Callable[P, Any]) -> PyinfraOperation[P]:
     @wraps(func)
     def decorated_func(*args: P.args, **kwargs: P.kwargs) -> Any:
+        async_context = get_async_context()
+        if async_context is not None:
+            return async_context._call_wrapped_deploy(decorated_func, args, kwargs)
+
+        sync_context = get_sync_context()
+        if sync_context is not None:
+            return sync_context._call_wrapped_deploy(decorated_func, args, kwargs)
+
         deploy_kwargs, _ = pop_global_arguments(context.state, context.host, kwargs)
 
         deploy_data = getattr(func, "deploy_data", None)

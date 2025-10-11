@@ -204,6 +204,8 @@ class SyncContext:
                 self.state.set_stage(StateStage.Prepare)
             if self.state.current_stage < StateStage.Execute:
                 self.state.set_stage(StateStage.Execute)
+            elif self.state.current_stage > StateStage.Execute:
+                self.state.current_stage = StateStage.Execute
 
             was_executing = self.state.is_executing
             if not was_executing:
@@ -255,3 +257,108 @@ class SyncContext:
     ) -> Any:
         with self._with_context(host):
             return host.get_fact(fact_cls, *fact_args, **fact_kwargs)
+
+    def _call_wrapped_deploy(
+        self,
+        deploy_fn,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        deploy_kwargs = dict(kwargs)
+        hosts_override = deploy_kwargs.pop("hosts", None)
+        suspend_token = suspend_sync_context()
+        try:
+            self.run_deploy(deploy_fn, *args, hosts=hosts_override, **deploy_kwargs)
+        finally:
+            reset_sync_context(suspend_token)
+
+    def _call_wrapped_fact(
+        self,
+        host: Host,
+        fact_cls,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        fact_kwargs = dict(kwargs)
+        fact_args = args
+
+        suspend_token = suspend_sync_context()
+        try:
+            self._ensure_hosts_connected([host])
+            return self._fetch_fact(host, fact_cls, fact_args, fact_kwargs)
+        finally:
+            reset_sync_context(suspend_token)
+
+    def run_deploy(
+        self,
+        deploy_fn,
+        *deploy_args,
+        hosts: Iterable[Host | str] | None = None,
+        **deploy_kwargs,
+    ) -> None:
+        """Execute a deploy immediately for the selected hosts."""
+
+        targets = self._normalise_hosts(hosts) if hosts is not None else self._default_hosts
+
+        self._ensure_hosts_connected(targets)
+
+        for host in targets:
+            self._execute_deploy(host, deploy_fn, deploy_args, deploy_kwargs)
+
+    def _execute_deploy(
+        self,
+        host: Host,
+        deploy_fn,
+        deploy_args: tuple[Any, ...],
+        deploy_kwargs: dict[str, Any],
+    ) -> None:
+        with self._with_context(host):
+            if self.state.current_stage < StateStage.Prepare:
+                self.state.set_stage(StateStage.Prepare)
+            if self.state.current_stage < StateStage.Execute:
+                self.state.set_stage(StateStage.Execute)
+            elif self.state.current_stage > StateStage.Execute:
+                self.state.current_stage = StateStage.Execute
+
+            was_executing = self.state.is_executing
+            if not was_executing:
+                self.state.is_executing = True
+
+            if host not in self.state.activated_hosts:
+                self.state.activate_host(host)
+
+            try:
+                deploy_fn(*deploy_args, **deploy_kwargs)
+            finally:
+                if not was_executing:
+                    self.state.is_executing = False
+
+
+class SyncHostContext:
+    """Convenience wrapper around :class:`SyncContext` for a single host."""
+
+    def __init__(self, state: State, host: Host | str) -> None:
+        self.state = state
+        self._host_arg = host
+        self.host: Host | None = None
+        self._context: SyncContext | None = None
+
+    def _resolve_host(self) -> Host:
+        if isinstance(self._host_arg, Host):
+            return self._host_arg
+
+        resolved = self.state.inventory.get_host(self._host_arg)
+        if resolved is None:
+            raise ValueError(f"Unknown host: {self._host_arg}")
+        return resolved
+
+    def __enter__(self) -> SyncContext:
+        self.host = self._resolve_host()
+        self._context = SyncContext(self.state, hosts=[self.host])
+        return self._context.__enter__()
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001 - sync context protocol
+        if self._context is None:
+            return
+        self._context.__exit__(exc_type, exc, tb)
+        self._context = None
