@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from random import shuffle
 
@@ -100,7 +101,9 @@ def _assert_operation_execution(expected, state):
     for op_hash, (expected_name, expected_hosts) in zip(op_order, expected, strict=True):
         op_meta = state.op_meta[op_hash]
         actual_name = next(iter(op_meta.names))
-        assert actual_name == expected_name
+        normalised_actual = actual_name.replace(os.sep, "/")
+        normalised_expected = expected_name.replace(os.sep, "/")
+        assert normalised_actual == normalised_expected
 
         for host in state.inventory:
             host_op = state.ops[host].get(op_hash)

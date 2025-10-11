@@ -113,6 +113,18 @@ class FileTransferClient(Protocol):
     def putfo(self, fl: IO, remote_filename: str) -> Any | None: ...
 
 
+def _expand_user_path(path: str | None) -> str | None:
+    if not path:
+        return None
+
+    if path.startswith("~/"):
+        home = os.environ.get("HOME")
+        if home:
+            return os.path.normpath(os.path.join(home, path[2:]))
+
+    return os.path.expanduser(path)
+
+
 def _format_known_host(hostname: str, port: Optional[int]) -> str:
     if port and port != 22:
         return f"[{hostname}]:{port}"
@@ -254,10 +266,11 @@ class SSHConnector(BaseConnector):
 
         ssh_config_file = self.data["ssh_config_file"]
         if ssh_config_file:
-            config_files.append(ssh_config_file)
+            expanded_config = _expand_user_path(ssh_config_file)
+            config_files.append(expanded_config or ssh_config_file)
         else:
-            default_config = os.path.expanduser("~/.ssh/config")
-            if os.path.isfile(default_config):
+            default_config = _expand_user_path("~/.ssh/config")
+            if default_config and os.path.isfile(default_config):
                 config_files.append(default_config)
 
         if config_files:
@@ -281,9 +294,11 @@ class SSHConnector(BaseConnector):
 
         known_hosts_data = self.data.get("ssh_known_hosts_file") or None
         if known_hosts_data:
-            known_hosts_path = os.path.expanduser(known_hosts_data)
+            known_hosts_path = _expand_user_path(known_hosts_data)
+            if known_hosts_path is None:
+                known_hosts_path = known_hosts_data
         else:
-            known_hosts_path = os.path.expanduser("~/.ssh/known_hosts")
+            known_hosts_path = _expand_user_path("~/.ssh/known_hosts")
 
         self._known_hosts_file = known_hosts_path if known_hosts_path else None
 
