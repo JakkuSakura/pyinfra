@@ -6,7 +6,6 @@ import random
 import shlex
 import tempfile
 import warnings
-from threading import Event, Thread
 from typing import (
     IO,
     TYPE_CHECKING,
@@ -14,8 +13,7 @@ from typing import (
     Iterable,
     Optional,
     Protocol,
-    Coroutine,
-    TypeVar,
+    cast,
 )
 
 from socket import timeout as timeout_error
@@ -34,18 +32,15 @@ from .base import BaseConnector, DataMeta
 from .util import (
     CommandOutput,
     OutputLine,
-    execute_command_with_sudo_retry,
-    make_unix_command_for_host,
-    run_local_process,
+    async_make_unix_command_for_host,
+    execute_command_with_sudo_retry_async,
+    run_local_process_async,
 )
 
 if TYPE_CHECKING:
     from pyinfra.api.arguments import ConnectorArguments
     from pyinfra.api.host import Host
     from pyinfra.api.state import State
-
-
-T = TypeVar("T")
 
 
 class ConnectorData(TypedDict):
@@ -146,7 +141,7 @@ class _SFTPWrapper:
         self._connector = connector
 
     def getfo(self, remote_filename: str, fl: IO) -> None:
-        data = self._connector._submit(self._connector._async_read_file(remote_filename))
+        data = self._connector.host._run_async(self._connector._async_read_file(remote_filename))
         fl.write(data)
 
     def putfo(self, fl: IO, remote_filename: str) -> None:
@@ -156,7 +151,7 @@ class _SFTPWrapper:
         fl.seek(position)
         if isinstance(data, str):
             data = data.encode()
-        self._connector._submit(self._connector._async_write_file(remote_filename, data))
+        self._connector.host._run_async(self._connector._async_write_file(remote_filename, data))
 
 
 class _SCPWrapper:
@@ -164,7 +159,7 @@ class _SCPWrapper:
         self._connector = connector
 
     def getfo(self, remote_filename: str, fl: IO) -> None:
-        data = self._connector._submit(self._connector._async_scp_download(remote_filename))
+        data = self._connector.host._run_async(self._connector._async_scp_download(remote_filename))
         fl.write(data)
 
     def putfo(self, fl: IO, remote_filename: str) -> None:
@@ -176,7 +171,7 @@ class _SCPWrapper:
             fl.seek(position)
         if isinstance(data, str):
             data = data.encode()
-        self._connector._submit(self._connector._async_scp_upload(remote_filename, data))
+        self._connector.host._run_async(self._connector._async_scp_upload(remote_filename, data))
 
 
 class SSHConnector(BaseConnector):
@@ -188,9 +183,6 @@ class SSHConnector(BaseConnector):
 
     def __init__(self, state: "State", host: "Host"):
         super().__init__(state, host)
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._loop_thread: Thread | None = None
-        self._loop_ready: Event | None = None
         self._connection: asyncssh.SSHClientConnection | None = None
         self._sftp_client: asyncssh.SFTPClient | None = None
         self._known_hosts_file: str | None = None
@@ -204,33 +196,6 @@ class SSHConnector(BaseConnector):
     @staticmethod
     def make_names_data(name):
         yield f"@ssh/{name}", {"ssh_hostname": name}, []
-
-    # Event loop helpers
-
-    def _ensure_loop(self) -> None:
-        if self._loop is not None:
-            return
-
-        self._loop = asyncio.new_event_loop()
-        self._loop_ready = Event()
-
-        def _run_loop() -> None:
-            assert self._loop is not None
-            asyncio.set_event_loop(self._loop)
-            assert self._loop_ready is not None
-            self._loop_ready.set()
-            self._loop.run_forever()
-
-        self._loop_thread = Thread(target=_run_loop, daemon=True)
-        self._loop_thread.start()
-        assert self._loop_ready is not None
-        self._loop_ready.wait()
-
-    def _submit(self, coro: Coroutine[Any, Any, T]) -> T:
-        self._ensure_loop()
-        assert self._loop is not None
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
 
     # Connection management
 
@@ -524,7 +489,7 @@ class SSHConnector(BaseConnector):
         return certificates
 
     @override
-    def connect(self) -> None:
+    async def connect(self) -> None:
         hostname = self.data["ssh_hostname"] or self.host.name
         if self._transfer_protocol not in {"sftp", "scp"}:
             raise ConnectError(f"Unsupported file transfer protocol: {self._transfer_protocol}")
@@ -534,7 +499,7 @@ class SSHConnector(BaseConnector):
         logger.debug("Connecting to: %s (%r)", hostname, kwargs)
 
         try:
-            self._connection = self._submit(self._async_connect(hostname, kwargs, strict_setting))
+            self._connection = await self._async_connect(hostname, kwargs, strict_setting)
         except (asyncssh.Error, OSError) as exc:
             raise ConnectError(f"SSH error connecting to {hostname}: {exc}")
 
@@ -663,84 +628,78 @@ class SSHConnector(BaseConnector):
         await self._store_host_key(connection, hostname, port)
 
     @override
-    def disconnect(self) -> None:
-        async def _close() -> None:
-            if self._sftp_client:
-                self._sftp_client.exit()
-                self._sftp_client = None
-            if self._connection is not None:
-                self._connection.close()
-                await self._connection.wait_closed()
-
-        if self._loop is not None:
-            self._submit(_close())
-        else:
+    async def disconnect(self) -> None:
+        if self._sftp_client:
+            self._sftp_client.exit()
             self._sftp_client = None
 
-        self._connection = None
-
-        if self._loop and self._loop_thread:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop_thread.join()
-        self._loop = None
-        self._loop_thread = None
-        self._loop_ready = None
+        if self._connection is not None:
+            self._connection.close()
+            await self._connection.wait_closed()
+            self._connection = None
 
     # Command execution
 
     @override
-    def run_shell_command(
+    async def run_shell_command(
         self,
         command: StringCommand,
         print_output: bool = False,
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> tuple[bool, CommandOutput]:
-        _get_pty = arguments.pop("_get_pty", False)
-        _timeout = arguments.pop("_timeout", None)
-        _stdin = arguments.pop("_stdin", None)
-        _success_exit_codes = arguments.pop("_success_exit_codes", None)
+        command_arguments: dict[str, Any] = dict(arguments)
 
-        def execute_command() -> tuple[int, CommandOutput]:
-            unix_command = make_unix_command_for_host(self.state, self.host, command, **arguments)
+        get_pty = command_arguments.pop("_get_pty", False)
+        timeout = command_arguments.pop("_timeout", None)
+        stdin_value = command_arguments.pop("_stdin", None)
+        success_exit_codes = command_arguments.pop("_success_exit_codes", None)
+
+        async def execute_command() -> tuple[int, CommandOutput]:
+            unix_command = await async_make_unix_command_for_host(
+                self.state,
+                self.host,
+                command,
+                **command_arguments,
+            )
             actual_command = unix_command.get_raw_value()
 
             logger.debug(
                 "Running command on %s: (pty=%s) %s",
                 self.host.name,
-                _get_pty,
+                get_pty,
                 unix_command,
             )
 
             if print_input:
                 click.echo(f"{self.host.print_prefix}>>> {unix_command}", err=True)
 
-            stdin_value = _normalise_stdin(_stdin)
+            stdin_normalised = _normalise_stdin(stdin_value)
 
             try:
-                exit_status, combined_output = self._submit(
-                    self._async_run_command(
-                        actual_command,
-                        stdin_value,
-                        _get_pty,
-                        _timeout,
-                        print_output,
-                        self.host.print_prefix,
-                    ),
+                exit_status, combined_output = await self._async_run_command(
+                    actual_command,
+                    stdin_normalised,
+                    get_pty,
+                    timeout,
+                    print_output,
+                    self.host.print_prefix,
                 )
             except asyncio.TimeoutError as exc:
                 raise timeout_error() from exc
 
             return exit_status, combined_output
 
-        return_code, combined_output = execute_command_with_sudo_retry(
+        connector_args = cast("ConnectorArguments", command_arguments)
+
+        return_code, combined_output = await execute_command_with_sudo_retry_async(
             self.host,
-            arguments,
+            connector_args,
             execute_command,
         )
 
-        if _success_exit_codes:
-            status = return_code in _success_exit_codes
+        if success_exit_codes is not None:
+            status = return_code in success_exit_codes
         else:
             status = return_code == 0
 
@@ -847,16 +806,8 @@ class SSHConnector(BaseConnector):
             return _SCPWrapper(self)
         return _SFTPWrapper(self)
 
-    def _get_file(self, remote_filename: str, filename_or_io: str | IO) -> None:
-        if self._transfer_protocol == "scp":
-            data = self._submit(self._async_scp_download(remote_filename))
-        else:
-            data = self._submit(self._async_read_file(remote_filename))
-        with get_file_io(filename_or_io, "wb") as file_io:
-            file_io.write(data)
-
     @override
-    def get_file(
+    async def get_file(
         self,
         remote_filename: str,
         filename_or_io,
@@ -865,16 +816,22 @@ class SSHConnector(BaseConnector):
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> bool:
-        _sudo = arguments.get("_sudo", False)
-        _su_user = arguments.get("_su_user", None)
+        sudo_enabled = arguments.get("_sudo", False)
+        su_user = arguments.get("_su_user", None)
 
-        if _sudo or _su_user:
+        if sudo_enabled or su_user:
             temp_file = remote_temp_filename or self.host.get_temp_filename(remote_filename)
             command = StringCommand(
-                "cp", remote_filename, temp_file, "&&", "chmod", "+r", temp_file
+                "cp",
+                remote_filename,
+                temp_file,
+                "&&",
+                "chmod",
+                "+r",
+                temp_file,
             )
 
-            copy_status, output = self.run_shell_command(
+            copy_status, output = await self.run_shell_command(
                 command,
                 print_output=print_output,
                 print_input=print_input,
@@ -886,34 +843,43 @@ class SSHConnector(BaseConnector):
                 return False
 
             try:
-                self._get_file(temp_file, filename_or_io)
+                await self._download_file(temp_file, filename_or_io)
             finally:
-                self.run_shell_command(
+                await self.run_shell_command(
                     StringCommand("rm", "-f", temp_file),
                     print_output=print_output,
                     print_input=print_input,
                     **arguments,
                 )
         else:
-            self._get_file(remote_filename, filename_or_io)
+            await self._download_file(remote_filename, filename_or_io)
 
         if print_output:
             click.echo(f"{self.host.print_prefix}file downloaded: {remote_filename}", err=True)
 
         return True
 
-    def _put_file(self, filename_or_io, remote_location):
+    async def _download_file(self, remote_filename: str, filename_or_io: str | IO) -> None:
+        if self._transfer_protocol == "scp":
+            data = await self._async_scp_download(remote_filename)
+        else:
+            data = await self._async_read_file(remote_filename)
+
+        with get_file_io(filename_or_io, "wb") as file_io:
+            file_io.write(data)
+
+    async def _upload_file(self, filename_or_io, remote_location):
         with get_file_io(filename_or_io) as file_io:
             data = file_io.read()
             if isinstance(data, str):
                 data = data.encode()
             if self._transfer_protocol == "scp":
-                self._submit(self._async_scp_upload(remote_location, data))
+                await self._async_scp_upload(remote_location, data)
             else:
-                self._submit(self._async_write_file(remote_location, data))
+                await self._async_write_file(remote_location, data)
 
     @override
-    def put_file(
+    async def put_file(
         self,
         filename_or_io,
         remote_filename,
@@ -922,25 +888,23 @@ class SSHConnector(BaseConnector):
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> bool:
-        original_arguments = arguments.copy()
+        sudo_enabled = arguments.get("_sudo", False)
+        sudo_user = arguments.get("_sudo_user", False)
+        doas_enabled = arguments.get("_doas", False)
+        doas_user = arguments.get("_doas_user", False)
+        su_user = arguments.get("_su_user", None)
 
-        _sudo = arguments.pop("_sudo", False)
-        _sudo_user = arguments.pop("_sudo_user", False)
-        _doas = arguments.pop("_doas", False)
-        _doas_user = arguments.pop("_doas_user", False)
-        _su_user = arguments.pop("_su_user", None)
-
-        if _sudo or _doas or _su_user:
+        if sudo_enabled or doas_enabled or su_user:
             temp_file = remote_temp_filename or self.host.get_temp_filename(remote_filename)
-            self._put_file(filename_or_io, temp_file)
+            await self._upload_file(filename_or_io, temp_file)
 
-            other_user = _su_user or _sudo_user or _doas_user
+            other_user = su_user or sudo_user or doas_user
             if other_user:
-                status, output = self.run_shell_command(
+                status, output = await self.run_shell_command(
                     StringCommand("setfacl", "-m", f"u:{other_user}:r", temp_file),
                     print_output=print_output,
                     print_input=print_input,
-                    **original_arguments,
+                    **arguments,
                 )
                 if status is False:
                     logger.error("Unable to set ACL for temp file: %s", output.stderr)
@@ -956,11 +920,11 @@ class SSHConnector(BaseConnector):
                 remote_filename,
             )
 
-            status, output = self.run_shell_command(
+            status, output = await self.run_shell_command(
                 command,
                 print_output=print_output,
                 print_input=print_input,
-                **original_arguments,
+                **arguments,
             )
 
             if status is False:
@@ -968,7 +932,7 @@ class SSHConnector(BaseConnector):
                 return False
 
         else:
-            self._put_file(filename_or_io, remote_filename)
+            await self._upload_file(filename_or_io, remote_filename)
 
         if print_output:
             click.echo(f"{self.host.print_prefix}file uploaded: {remote_filename}", err=True)
@@ -993,7 +957,7 @@ class SSHConnector(BaseConnector):
             raise NotImplementedError("The `rsync` binary is not available on this system.")
 
     @override
-    def rsync(
+    async def rsync(
         self,
         src: str,
         dest: str,
@@ -1002,8 +966,9 @@ class SSHConnector(BaseConnector):
         print_input: bool = False,
         **arguments: Unpack["ConnectorArguments"],
     ) -> bool:
-        _sudo = arguments.pop("_sudo", False)
-        _sudo_user = arguments.pop("_sudo_user", False)
+        arguments_dict = dict(arguments)
+        sudo_enabled = arguments_dict.pop("_sudo", False)
+        sudo_user = arguments_dict.pop("_sudo_user", False)
 
         hostname = self.data["ssh_hostname"] or self.host.name
         user = self.data["ssh_user"]
@@ -1030,10 +995,10 @@ class SSHConnector(BaseConnector):
             ssh_flags.append(f"-i {shlex.quote(ssh_key)}")
 
         remote_rsync_command = "rsync"
-        if _sudo:
+        if sudo_enabled:
             remote_rsync_command = "sudo rsync"
-            if _sudo_user:
-                remote_rsync_command = f"sudo -u {_sudo_user} rsync"
+            if sudo_user:
+                remote_rsync_command = f"sudo -u {sudo_user} rsync"
 
         rsync_command = (
             "rsync {rsync_flags} --rsh \"ssh {ssh_flags}\" --rsync-path '{remote_rsync_command}' "
@@ -1051,7 +1016,7 @@ class SSHConnector(BaseConnector):
         if print_input:
             click.echo(f"{self.host.print_prefix}>>> {rsync_command}", err=True)
 
-        return_code, output = run_local_process(
+        return_code, output = await run_local_process_async(
             rsync_command,
             print_output=print_output,
             print_prefix=self.host.print_prefix,

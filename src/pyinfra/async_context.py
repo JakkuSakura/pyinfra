@@ -242,9 +242,7 @@ class AsyncContext:
             return
 
         connect_tasks = [
-            self.state.run_in_executor(
-                partial(host.connect, reason="async context", raise_exceptions=True)
-            )
+            asyncio.create_task(host.connect_async(reason="async context", raise_exceptions=True))
             for host in hosts_to_connect
         ]
 
@@ -276,7 +274,7 @@ class AsyncContext:
         for host in targets:
             if host.connected:
                 disconnect_hosts.append(host)
-                disconnect_tasks.append(self.state.run_in_executor(host.disconnect))
+                disconnect_tasks.append(asyncio.create_task(host.disconnect_async()))
             else:
                 self._managed_hosts.discard(host)
 

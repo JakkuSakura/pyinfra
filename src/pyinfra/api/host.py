@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from copy import copy
+from logging import Logger, getLogger
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -15,13 +17,12 @@ from typing import (
     overload,
 )
 from uuid import uuid4
-from logging import Logger, getLogger
 
 import click
 from typing_extensions import Unpack, override
 
 from pyinfra.connectors.base import BaseConnector
-from pyinfra.connectors.util import CommandOutput, remove_any_sudo_askpass_file
+from pyinfra.connectors.util import CommandOutput, remove_any_sudo_askpass_file_async
 
 from .connectors import get_execution_connector
 from .exceptions import ConnectError
@@ -393,17 +394,34 @@ class Host:
         if not self.state:
             raise TypeError("Cannot call this function with no state!")
 
+    def _run_async(self, coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        raise RuntimeError(
+            "Cannot call synchronous host method while an event loop is running in this thread. "
+            "Use the corresponding async method instead.",
+        )
+
     def connect(self, reason=None, show_errors: bool = True, raise_exceptions: bool = False):
         """
         Connect to the host using it's configured connector.
         """
+        return self._run_async(self.connect_async(reason, show_errors, raise_exceptions))
 
+    async def connect_async(
+        self,
+        reason=None,
+        show_errors: bool = True,
+        raise_exceptions: bool = False,
+    ) -> None:
         self._check_state()
         if not self.connected:
             self.state.trigger_callbacks("host_before_connect", self)
 
             try:
-                self.connector.connect()
+                await self.connector.connect()
             except ConnectError as e:
                 if show_errors:
                     log_message = "{0}{1}".format(
@@ -435,15 +453,16 @@ class Host:
         """
         Disconnect from the host using it's configured connector.
         """
+        self._run_async(self.disconnect_async())
+
+    async def disconnect_async(self) -> None:
         self._check_state()
 
-        # Disconnect is an optional function for connectors if needed
         disconnect_func = getattr(self.connector, "disconnect", None)
         if disconnect_func:
-            disconnect_func()
+            await disconnect_func()
 
-        # TODO: consider whether this should be here!
-        remove_any_sudo_askpass_file(self)
+        await remove_any_sudo_askpass_file_async(self)
 
         self.state.trigger_callbacks("host_disconnect", self)
         self.connected = False
@@ -454,22 +473,31 @@ class Host:
         """
         Low level method to execute a shell command on the host via it's configured connector.
         """
+        return self._run_async(self.run_shell_command_async(*args, **kwargs))
+
+    async def run_shell_command_async(self, *args, **kwargs) -> tuple[bool, CommandOutput]:
         self._check_state()
-        return self.connector.run_shell_command(*args, **kwargs)
+        return await self.connector.run_shell_command(*args, **kwargs)
 
     def put_file(self, *args, **kwargs) -> bool:
         """
         Low level method to upload a file to the host via it's configured connector.
         """
+        return self._run_async(self.put_file_async(*args, **kwargs))
+
+    async def put_file_async(self, *args, **kwargs) -> bool:
         self._check_state()
-        return self.connector.put_file(*args, **kwargs)
+        return await self.connector.put_file(*args, **kwargs)
 
     def get_file(self, *args, **kwargs) -> bool:
         """
         Low level method to download a file from the host via it's configured connector.
         """
+        return self._run_async(self.get_file_async(*args, **kwargs))
+
+    async def get_file_async(self, *args, **kwargs) -> bool:
         self._check_state()
-        return self.connector.get_file(*args, **kwargs)
+        return await self.connector.get_file(*args, **kwargs)
 
     # Rsync - optional connector specific ability
 
@@ -479,4 +507,8 @@ class Host:
 
     def rsync(self, *args, **kwargs) -> bool:
         self._check_state()
-        return self.connector.rsync(*args, **kwargs)
+        return self._run_async(self.rsync_async(*args, **kwargs))
+
+    async def rsync_async(self, *args, **kwargs) -> bool:
+        self._check_state()
+        return await self.connector.rsync(*args, **kwargs)

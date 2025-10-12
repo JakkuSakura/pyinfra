@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import inspect
 from pathlib import Path
 
 from pyinfra import inventory
@@ -20,7 +23,29 @@ def _reset_contexts() -> None:
 
 def _patch_sync_executor(monkeypatch):
     async def _run_in_executor_sync(self, func, *args, **kwargs):
-        return func(*args, **kwargs)
+        bound_self = getattr(func, "__self__", None)
+        name = getattr(func, "__name__", "")
+
+        if bound_self is not None:
+            if name == "connect":
+                return await bound_self.connect_async(*args, **kwargs)
+            if name == "disconnect":
+                return await bound_self.disconnect_async(*args, **kwargs)
+
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+
+        def _call_in_thread():
+            result = context.run(func, *args, **kwargs)
+            if inspect.isawaitable(result):
+                return context.run(asyncio.run, result)
+            return result
+
+        executor = getattr(self, "executor", None)
+        if executor is None:
+            raise RuntimeError("State executor not initialised")
+
+        return await loop.run_in_executor(executor, _call_in_thread)
 
     monkeypatch.setattr(
         "pyinfra.api.state.State.run_in_executor",
