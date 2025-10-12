@@ -115,7 +115,9 @@ class TestContainerConnector(TestCase):
         quoted = inner_bits[0]
         assert isinstance(quoted, QuoteString)
         assert isinstance(quoted.obj, StringCommand)
-        assert quoted.obj.get_raw_value() == make_unix_command(StringCommand(command)).get_raw_value()
+        assert (
+            quoted.obj.get_raw_value() == make_unix_command(StringCommand(command)).get_raw_value()
+        )
         assert kwargs.get("print_output") is True
 
     def test_run_shell_command_success_exit_codes(self):
@@ -131,7 +133,7 @@ class TestContainerConnector(TestCase):
 
     def test_run_shell_command_error(self):
         inventory = make_inventory(hosts=(f"@{self.connector_name}/not-an-image",))
-        state = State(inventory, Config())
+        State(inventory, Config())
         command = "echo hi"
         host = inventory.get_host(f"@{self.connector_name}/not-an-image")
         host.connect()
@@ -183,8 +185,7 @@ class TestContainerConnector(TestCase):
 
         host.get_file("not-a-file", "not-another-file", print_output=True)
         cp_call = self._find_last_call(
-            lambda cmd: tuple(cmd.bits[:3])
-            == (self.cli_cmd, "cp", "containerid:not-a-file"),
+            lambda cmd: tuple(cmd.bits[:3]) == (self.cli_cmd, "cp", "containerid:not-a-file"),
         )
         assert cp_call is not None
         cp_command, kwargs = cp_call
@@ -271,8 +272,7 @@ class TestContainerConnector(TestCase):
 
     def _find_exec_call(self):
         return self._find_last_call(
-            lambda cmd: len(cmd.bits) >= 6
-            and tuple(cmd.bits[:2]) == (self.cli_cmd, "exec"),
+            lambda cmd: len(cmd.bits) >= 6 and tuple(cmd.bits[:2]) == (self.cli_cmd, "exec"),
         )
 
     def _set_exec_result(self, success: bool):

@@ -10,6 +10,7 @@ from pyinfra.connectors.util import CommandOutput, OutputLine, make_unix_command
 
 from ..util import make_inventory
 
+
 @patch("pyinfra.connectors.chroot.mkstemp", lambda: (None, "__tempfile__"))
 @patch("pyinfra.connectors.chroot.os.remove", lambda f: None)
 @patch("pyinfra.connectors.chroot.open", mock_open(read_data="test!"), create=True)
