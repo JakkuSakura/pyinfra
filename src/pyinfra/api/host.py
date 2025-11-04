@@ -375,15 +375,11 @@ class Host:
         """
         Get a fact for this host, reading from the cache if present.
         """
-        from pyinfra.api.operation import get_async_context, get_sync_context
+        from pyinfra.api.operation import get_async_context
 
         async_context = get_async_context()
         if async_context is not None:
             return async_context._call_wrapped_fact(self, name_or_cls, args, kwargs)
-
-        sync_context = get_sync_context()
-        if sync_context is not None:
-            return sync_context._call_wrapped_fact(self, name_or_cls, args, kwargs)
 
         return _load_fact(self.state, self, name_or_cls, args=args, kwargs=kwargs)
 

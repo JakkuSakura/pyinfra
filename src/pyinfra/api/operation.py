@@ -42,12 +42,6 @@ _current_async_context: ContextVar[Any | None] = ContextVar(
     "pyinfra_current_async_context",
     default=None,
 )
-_current_sync_context: ContextVar[Any | None] = ContextVar(
-    "pyinfra_current_sync_context",
-    default=None,
-)
-
-
 def push_async_context(ctx: Any) -> Token:
     return _current_async_context.set(ctx)
 
@@ -62,22 +56,6 @@ def suspend_async_context() -> Token:
 
 def get_async_context() -> Any | None:
     return _current_async_context.get()
-
-
-def push_sync_context(ctx: Any) -> Token:
-    return _current_sync_context.set(ctx)
-
-
-def reset_sync_context(token: Token) -> None:
-    _current_sync_context.reset(token)
-
-
-def suspend_sync_context() -> Token:
-    return _current_sync_context.set(None)
-
-
-def get_sync_context() -> Any | None:
-    return _current_sync_context.get()
 
 
 if TYPE_CHECKING:
@@ -313,10 +291,6 @@ def _wrap_operation(func: Callable[P, Generator], _set_in_op: bool = True) -> Py
         async_context = get_async_context()
         if async_context is not None:
             return async_context._call_wrapped_operation(decorated_func, args, kwargs)
-
-        sync_context = get_sync_context()
-        if sync_context is not None:
-            return sync_context._call_wrapped_operation(decorated_func, args, kwargs)
 
         state = context.state
         host = context.host
