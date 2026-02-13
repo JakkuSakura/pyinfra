@@ -1022,6 +1022,26 @@ class SSHCommonConnector(BaseConnector):
             else:
                 await self._async_write_file(remote_location, data)
 
+    @staticmethod
+    def _without_privilege_arguments(arguments: "ConnectorArguments") -> "ConnectorArguments":
+        plain_arguments = dict(arguments)
+        for key in (
+            "_sudo",
+            "_sudo_user",
+            "_sudo_password",
+            "_sudo_askpass_path",
+            "_use_sudo_login",
+            "_preserve_sudo_env",
+            "_doas",
+            "_doas_user",
+            "_su_user",
+            "_use_su_login",
+            "_preserve_su_env",
+            "_su_shell",
+        ):
+            plain_arguments.pop(key, None)
+        return cast("ConnectorArguments", plain_arguments)
+
     @override
     async def put_file(
         self,
@@ -1044,11 +1064,12 @@ class SSHCommonConnector(BaseConnector):
 
             other_user = su_user or sudo_user or doas_user
             if other_user:
+                acl_arguments = self._without_privilege_arguments(arguments)
                 status, output = await self.run_shell_command(
                     StringCommand("setfacl", "-m", f"u:{other_user}:r", temp_file),
                     print_output=print_output,
                     print_input=print_input,
-                    **arguments,
+                    **acl_arguments,
                 )
                 if status is False:
                     logger.error("Unable to set ACL for temp file: %s", output.stderr)

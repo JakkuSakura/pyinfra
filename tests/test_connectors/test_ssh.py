@@ -183,6 +183,62 @@ def test_private_key_certificates_are_loaded(tmp_path):
     assert len(kwargs["client_certs"]) == 1
 
 
+def test_put_file_with_sudo_user_keeps_setfacl_unprivileged(fake_asyncssh, monkeypatch, tmp_path):
+    inventory = make_inventory(override_data={"ssh_file_transfer_protocol": "scp"})
+    state = State(inventory, Config())
+
+    remote_files: Dict[str, Dict[str, bytes]] = {}
+
+    async def _scp_stub(src, dst, **kwargs):  # type: ignore[override]
+        if isinstance(dst, tuple):
+            client, remote_path = dst
+            with open(src, "rb") as src_file:
+                data = src_file.read()
+            remote_files.setdefault(client.hostname, {})[remote_path] = data
+            return
+
+        client, remote_path = src
+        data = remote_files.get(client.hostname, {}).get(remote_path)
+        if data is None:
+            raise FileNotFoundError(remote_path)
+        directory = os.path.dirname(dst)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(dst, "wb") as dest_file:
+            dest_file.write(data)
+
+    monkeypatch.setattr(asyncssh, "scp", _scp_stub)
+
+    connect_all(state)
+    host = inventory.get_host("somehost")
+
+    local_file = tmp_path / "upload.txt"
+    local_file.write_text("hello sudo user")
+
+    assert (
+        host.put_file(
+            str(local_file),
+            "/remote/upload.txt",
+            remote_temp_filename="/tmp/pyinfra-upload-temp",
+            _sudo=True,
+            _sudo_user="appuser",
+        )
+        is True
+    )
+
+    connection = fake_asyncssh[host.name]
+    all_commands = "\n".join(connection.commands_run)
+
+    assert "setfacl -m u:appuser:r" in all_commands
+    assert "sudo -H -n -u appuser" in all_commands
+
+    setfacl_commands = [cmd for cmd in connection.commands_run if "setfacl -m u:appuser:r" in cmd]
+    assert setfacl_commands
+    assert all("sudo -H -n -u appuser" not in cmd for cmd in setfacl_commands)
+
+    disconnect_all(state)
+
+
 def test_default_ssh_config_is_loaded(fake_asyncssh, tmp_path, monkeypatch):
     home = tmp_path / "home"
     config_dir = home / ".ssh"
