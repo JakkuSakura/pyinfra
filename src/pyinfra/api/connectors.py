@@ -19,6 +19,16 @@ def get_all_connectors():
 
         discovered["ssh"] = SSHConnector
 
+    if "asyncssh" not in discovered:
+        from pyinfra.connectors.asyncssh import AsyncSSHConnector
+
+        discovered["asyncssh"] = AsyncSSHConnector
+
+    if "ssh-cli" not in discovered:
+        from pyinfra.connectors.ssh_cli import SSHCLIConnector
+
+        discovered["ssh-cli"] = SSHCLIConnector
+
     if "local" not in discovered:
         from pyinfra.connectors.local import LocalConnector
 
