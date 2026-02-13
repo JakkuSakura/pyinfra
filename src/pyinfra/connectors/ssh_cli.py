@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing_extensions import override
 
-from .ssh import SSHConnector
+from .ssh_common import SSHCommonConnector
 
 
-class SSHCLIConnector(SSHConnector):
+class SSHCLIConnector(SSHCommonConnector):
     handles_execution = True
 
     @override

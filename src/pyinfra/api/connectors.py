@@ -14,15 +14,17 @@ def get_all_connectors():
         for entrypoint in entry_points(group="pyinfra.connectors")
     }
 
-    if "ssh" not in discovered:
-        from pyinfra.connectors.ssh import SSHConnector
-
-        discovered["ssh"] = SSHConnector
-
-    if "asyncssh" not in discovered:
+    if "async-ssh" not in discovered:
         from pyinfra.connectors.asyncssh import AsyncSSHConnector
 
-        discovered["asyncssh"] = AsyncSSHConnector
+        discovered["async-ssh"] = AsyncSSHConnector
+
+    # Backward-compatible aliases for async-ssh
+    if "asyncssh" not in discovered:
+        discovered["asyncssh"] = discovered["async-ssh"]
+
+    if "ssh" not in discovered:
+        discovered["ssh"] = discovered["async-ssh"]
 
     if "ssh-cli" not in discovered:
         from pyinfra.connectors.ssh_cli import SSHCLIConnector

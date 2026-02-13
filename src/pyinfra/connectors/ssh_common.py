@@ -137,7 +137,7 @@ def _normalise_stdin(stdin: Any) -> Optional[str]:
 
 
 class _SFTPWrapper:
-    def __init__(self, connector: "SSHConnector") -> None:
+    def __init__(self, connector: "SSHCommonConnector") -> None:
         self._connector = connector
 
     def getfo(self, remote_filename: str, fl: IO) -> None:
@@ -155,7 +155,7 @@ class _SFTPWrapper:
 
 
 class _SCPWrapper:
-    def __init__(self, connector: "SSHConnector") -> None:
+    def __init__(self, connector: "SSHCommonConnector") -> None:
         self._connector = connector
 
     def getfo(self, remote_filename: str, fl: IO) -> None:
@@ -174,7 +174,7 @@ class _SCPWrapper:
         self._connector.host._run_async(self._connector._async_scp_upload(remote_filename, data))
 
 
-class SSHConnector(BaseConnector):
+class SSHCommonConnector(BaseConnector):
     handles_execution = True
 
     data_cls = ConnectorData
@@ -547,9 +547,9 @@ class SSHConnector(BaseConnector):
 
     @override
     async def connect(self) -> None:
-        hostname = self.data["ssh_hostname"] or self.host.name
         if self._transfer_protocol not in {"sftp", "scp"}:
             raise ConnectError(f"Unsupported file transfer protocol: {self._transfer_protocol}")
+        hostname = self.data["ssh_hostname"] or self.host.name
         strict_setting = (self.data["ssh_strict_host_key_checking"] or "accept-new").lower()
         self._strict_setting = strict_setting
 
@@ -936,11 +936,10 @@ class SSHConnector(BaseConnector):
                 except FileNotFoundError:
                     pass
 
-        assert self._connection is not None, "SSH connection not initialised"
-
         basename = os.path.basename(remote_filename.rstrip("/")) or "pyinfra-download"
         with tempfile.TemporaryDirectory() as temp_dir:
             local_path = os.path.join(temp_dir, basename)
+            assert self._connection is not None, "SSH connection not initialised"
             await asyncssh.scp((self._connection, remote_filename), local_path)
             with open(local_path, "rb") as local_file:
                 return local_file.read()
