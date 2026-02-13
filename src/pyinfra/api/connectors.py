@@ -59,6 +59,26 @@ def get_all_connectors():
 
         discovered["chroot"] = ChrootConnector
 
+    if "kubectl" not in discovered:
+        from pyinfra.connectors.kubectl import KubectlConnector
+
+        discovered["kubectl"] = KubectlConnector
+
+    if "nomad" not in discovered:
+        from pyinfra.connectors.nomad import NomadConnector
+
+        discovered["nomad"] = NomadConnector
+
+    if "cmd" not in discovered:
+        from pyinfra.connectors.cmd import CmdConnector
+
+        discovered["cmd"] = CmdConnector
+
+    if "powershell" not in discovered:
+        from pyinfra.connectors.powershell import PowerShellConnector
+
+        discovered["powershell"] = PowerShellConnector
+
     return discovered
 
 
