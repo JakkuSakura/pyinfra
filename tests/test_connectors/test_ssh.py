@@ -48,6 +48,31 @@ def test_run_shell_command_uses_asyncssh(fake_asyncssh):
     disconnect_all(state)
 
 
+def test_run_shell_command_with_sudo_user(fake_asyncssh):
+    inventory = make_inventory()
+    state = State(inventory, Config())
+
+    connect_all(state)
+    host = inventory.get_host("somehost")
+
+    connection = fake_asyncssh[host.name]
+    connection.command_results[
+        "sudo -H -n -u appuser sh -c 'echo hello'"
+    ] = {"stdout": "hello\n", "stderr": "", "exit_status": 0}
+
+    status, output = host.run_shell_command(
+        StringCommand("echo", "hello"),
+        _sudo=True,
+        _sudo_user="appuser",
+    )
+
+    assert status is True
+    assert output.stdout_lines == ["hello"]
+    assert any("sudo -H -n -u appuser" in command for command in connection.commands_run)
+
+    disconnect_all(state)
+
+
 def test_put_file_uses_scp_protocol(fake_asyncssh, monkeypatch, tmp_path):
     inventory = make_inventory(override_data={"ssh_file_transfer_protocol": "scp"})
     state = State(inventory, Config())
