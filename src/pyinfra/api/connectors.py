@@ -1,3 +1,6 @@
+import os
+import shutil
+
 try:
     from importlib_metadata import entry_points
 except ImportError:
@@ -69,3 +72,26 @@ def get_execution_connectors():
 
 def get_execution_connector(name):
     return get_execution_connectors()[name]
+
+
+def is_ssh_cli_available() -> bool:
+    return shutil.which("ssh") is not None and shutil.which("scp") is not None
+
+
+def get_default_ssh_connector_name(execution_connectors=None) -> str:
+    execution_connectors = execution_connectors or get_execution_connectors()
+
+    connector_name = os.environ.get("PYINFRA_SSH_CONNECTOR")
+    if connector_name:
+        return connector_name.strip().lstrip("@")
+
+    if "ssh-cli" in execution_connectors and is_ssh_cli_available():
+        return "ssh-cli"
+
+    if "async-ssh" in execution_connectors:
+        return "async-ssh"
+
+    if "ssh" in execution_connectors:
+        return "ssh"
+
+    return next(iter(execution_connectors))

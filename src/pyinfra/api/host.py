@@ -25,7 +25,7 @@ from typing_extensions import Unpack, override
 from pyinfra.connectors.base import BaseConnector
 from pyinfra.connectors.util import CommandOutput, remove_any_sudo_askpass_file_async
 
-from .connectors import get_execution_connector
+from .connectors import get_default_ssh_connector_name, get_execution_connector
 from .exceptions import ConnectError
 from .facts import FactBase, ShortFactBase, get_fact as _load_fact
 from .util import memoize, sha1_hash
@@ -160,7 +160,7 @@ class Host:
         connector_cls=None,
     ):
         if connector_cls is None:
-            connector_cls = get_execution_connector("ssh")
+            connector_cls = get_execution_connector(get_default_ssh_connector_name())
         self.inventory = inventory
         self.groups = groups
         self.connector_cls = connector_cls

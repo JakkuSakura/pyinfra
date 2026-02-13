@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Iterator
 
-from .connectors import get_all_connectors, get_execution_connectors
+from .connectors import (
+    get_all_connectors,
+    get_default_ssh_connector_name,
+    get_execution_connectors,
+)
 from .exceptions import NoConnectorError, NoGroupError, NoHostError
 from .host import Host
 
@@ -62,9 +65,7 @@ class Inventory:
         all_connectors = get_all_connectors()
         execution_connectors = get_execution_connectors()
 
-        default_connector_name = os.environ.get("PYINFRA_SSH_CONNECTOR", "ssh").strip()
-        if default_connector_name.startswith("@"):
-            default_connector_name = default_connector_name[1:]
+        default_connector_name = get_default_ssh_connector_name(execution_connectors)
         if default_connector_name not in execution_connectors:
             available = ", ".join(sorted(execution_connectors.keys()))
             raise NoConnectorError(
