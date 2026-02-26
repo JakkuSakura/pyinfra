@@ -46,3 +46,16 @@ def test_nomad_scale_command():
 
     assert len(commands) == 1
     assert commands[0].get_raw_value() == "nomad job scale market-server[workers] 3"
+
+
+def test_kubectl_get_command():
+    commands = list(
+        kubectl.get._inner(
+            "pods",
+            namespace="cattle-system",
+            output="wide",
+        ),
+    )
+
+    assert len(commands) == 1
+    assert commands[0].get_raw_value() == "kubectl -n cattle-system get pods -o wide"

@@ -88,3 +88,18 @@ def rollout_status(
     args = _base_args(namespace, context, kubeconfig)
     args.extend(["rollout", "status", resource, "--timeout", timeout])
     yield StringCommand(*args)
+
+
+@operation(is_idempotent=False)
+def get(
+    resource: str,
+    namespace: str | None = None,
+    context: str | None = None,
+    kubeconfig: str | None = None,
+    output: str | None = None,
+):
+    args = _base_args(namespace, context, kubeconfig)
+    args.extend(["get", resource])
+    if output:
+        args.extend(["-o", output])
+    yield StringCommand(*args)
